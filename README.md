@@ -20,6 +20,7 @@ No Gmail OAuth credentials are required for the current checkpoint. Credential a
 - Exact retries are idempotent; ambiguous Gmail outcomes stay counted until reconciled.
 - Undo deletes the Gmail draft before voiding—not deleting—the ledger row.
 - Company eligibility is derived from Companies House profile evidence, not caller-supplied labels.
+- Public directory records enter a separate discovery-only staging table; they are not leads and cannot be drafted.
 
 ## Development setup
 
@@ -45,10 +46,14 @@ Set `GOVSCOUT_DATABASE` or `GOVSCOUT_CONFIG` to use explicit local paths. See `.
 ```bash
 govscout sends --today
 govscout sends --week
+govscout harvest-lca --limit 25
+govscout candidates --limit 25
 govscout draft <lead-id>
 govscout draft-batch
 govscout send-undo <send-id>
 ```
+
+`harvest-lca` fetches only the fixed public Legionella Control Association directory URL and stages a deterministic sample of 1–50 source records. It performs no Companies House verification, contact discovery, signal scanning, drafting or outreach. Exact reruns refresh `last_seen_at`; changed source evidence fails closed for review.
 
 Draft-adjacent commands show the same authoritative capacity counter used by the web application. In the present production configuration, drafting stays locked with `LINT_NOT_READY`.
 
@@ -73,7 +78,7 @@ TS_IP=$(tailscale ip -4)
 govscout web --host "$TS_IP" --port 8766
 ```
 
-GovScout accepts only IP literals in loopback or Tailscale address ranges. Hostnames (including `localhost`), scoped IPv6 addresses, wildcard, LAN and public-IP binds are refused. Requests must also carry a strictly parsed Host header explicitly trusted for that process. `/today` displays capacity, warnings, lock state and the due worklist; POST actions are protected by session CSRF tokens and repeat policy/sendguard checks server-side.
+GovScout accepts only IP literals in loopback or Tailscale address ranges. Hostnames (including `localhost`), scoped IPv6 addresses, wildcard, LAN and public-IP binds are refused. Requests must also carry a strictly parsed Host header explicitly trusted for that process. `/today` displays capacity, warnings, lock state, read-only candidate staging and the separate due worklist; POST actions are protected by session CSRF tokens and repeat policy/sendguard checks server-side.
 
 A hardened user-service template is provided at `deploy/govscout.service`. Before enabling it on a fresh host, create its private data directory with `install -d -m 700 ~/.local/share/govscout`. On the Mise VPS it runs continuously at `http://100.72.212.14:8766/today`, reachable only from H's tailnet. Tailscale is the access gate; GovScout does not expose this port on the public interface.
 

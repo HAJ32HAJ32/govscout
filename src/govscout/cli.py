@@ -15,6 +15,12 @@ from govscout.draft_service import (
     DraftPolicyRefused,
     DraftService,
 )
+from govscout.lca_harvest import (
+    LcaDirectoryFormatError,
+    LcaDirectoryTransport,
+    UrlLcaDirectoryTransport,
+    harvest_lca,
+)
 from govscout.sendguard import (
     GuardDecision,
     ReservationConflict,
@@ -58,6 +64,14 @@ def build_parser() -> argparse.ArgumentParser:
     web = subparsers.add_parser("web", help="run the locked private review interface")
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=5000)
+    harvest_lca_parser = subparsers.add_parser(
+        "harvest-lca", help="stage a bounded sample from the official LCA directory"
+    )
+    harvest_lca_parser.add_argument("--limit", type=int, default=25)
+    candidates = subparsers.add_parser(
+        "candidates", help="list staged candidates awaiting verification"
+    )
+    candidates.add_argument("--limit", type=int, default=25)
     return parser
 
 
@@ -117,6 +131,7 @@ def main(
     now: datetime | None = None,
     draft_service: DraftService | None = None,
     candidate_source: CandidateSource | None = None,
+    lca_transport: LcaDirectoryTransport | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "web":
@@ -133,9 +148,60 @@ def main(
             use_reloader=False,
         )
         return 0
+    current_time = now or datetime.now(UTC)
+
+    if args.command == "harvest-lca":
+        if conn is None:
+            conn = connect_database(_default_database_path())
+            migrate(conn)
+        transport = lca_transport or UrlLcaDirectoryTransport()
+        try:
+            result = harvest_lca(
+                conn,
+                transport,
+                limit=args.limit,
+                now=current_time,
+            )
+        except (LcaDirectoryFormatError, OSError, ValueError) as exc:
+            print(f"LCA harvest failed: {exc}")
+            return 2
+        refreshed = result.staged_count - result.created_count
+        print(
+            f"LCA directory: {result.source_count} members; "
+            f"staged {result.staged_count} "
+            f"({result.created_count} new, {refreshed} refreshed)"
+        )
+        return 0
+
+    if args.command == "candidates":
+        if conn is None:
+            conn = connect_database(_default_database_path())
+            migrate(conn)
+        if not 1 <= args.limit <= 50:
+            print("Candidate list limit must be between 1 and 50")
+            return 2
+        rows = conn.execute(
+            """
+            SELECT id, status, company_name, source_location, source_url
+            FROM candidates
+            ORDER BY id
+            LIMIT ?
+            """,
+            (args.limit,),
+        ).fetchall()
+        if not rows:
+            print("No staged candidates")
+            return 0
+        for row in rows:
+            location = row["source_location"] or "Location not listed"
+            print(
+                f"{row['id']} | {row['status']} | {row['company_name']} | "
+                f"{location}\n  {row['source_url']}"
+            )
+        return 0
+
     if conn is None or guard is None:
         conn, guard = _default_dependencies()
-    current_time = now or datetime.now(UTC)
 
     if args.command == "sends":
         decision = guard.status(conn, now=current_time)

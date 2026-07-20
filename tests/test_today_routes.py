@@ -90,6 +90,43 @@ def test_today_shows_authoritative_counter_and_fail_closed_lint_lock(tmp_path):
     assert "Production drafting locked: LINT_NOT_READY" in page
 
 
+def test_today_shows_read_only_lca_candidate_staging_separately_from_leads(tmp_path):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    source_url = (
+        "https://www.legionellacontrolassociation.co.uk/company/example-limited/"
+    )
+    conn.execute(
+        """
+        INSERT INTO candidates (
+            source_register, source_url, company_name, source_location,
+            source_record_hash, discovered_at, last_seen_at
+        ) VALUES ('LCA member directory', ?, 'Example Limited', 'London', ?, ?, ?)
+        """,
+        (
+            source_url,
+            "a" * 64,
+            "2026-07-20T14:00:00+00:00",
+            "2026-07-20T14:00:00+00:00",
+        ),
+    )
+    conn.close()
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+    )
+
+    page = app.test_client().get("/today").get_data(as_text=True)
+
+    assert "Candidate staging" in page
+    assert "Example Limited" in page
+    assert "London" in page
+    assert f'href="{source_url}"' in page
+    assert "Awaiting Companies House and contact verification" in page
+    assert 'action="/today/draft/' not in page
+
+
 def test_today_rejects_non_loopback_host_header(tmp_path):
     database = tmp_path / "govscout.sqlite3"
     conn = connect_database(database)

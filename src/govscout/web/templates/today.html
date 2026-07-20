@@ -29,9 +29,31 @@
     </section>
     {% endif %}
 
+    <section class="worklist" aria-labelledby="candidate-staging-title">
+      <h2 id="candidate-staging-title">Candidate staging</h2>
+      <p>Public source records only. Awaiting Companies House and contact verification.</p>
+      {% if staged_candidates %}
+        <ol>
+        {% for candidate in staged_candidates %}
+          <li class="candidate">
+            <strong>{{ candidate.company_name }}</strong>
+            — {{ candidate.source_location or "Location not listed" }}
+            — {{ candidate.status }}
+            <br>
+            <a href="{{ candidate.source_url }}" target="_blank" rel="noopener noreferrer">
+              View LCA source record
+            </a>
+          </li>
+        {% endfor %}
+        </ol>
+      {% else %}
+        <p>No source candidates have been staged.</p>
+      {% endif %}
+    </section>
+
     <section class="worklist" aria-labelledby="worklist-title">
       <h2 id="worklist-title">Review worklist</h2>
-      {% if candidates %}
+      {% if due_candidates %}
         {% if not drafting_locked %}
         <form action="/today/drafts" method="post">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -39,7 +61,7 @@
         </form>
         {% endif %}
         <ol>
-        {% for candidate in candidates %}
+        {% for candidate in due_candidates %}
           <li class="candidate">
             <strong>Lead {{ candidate.lead_id }}</strong>
             — {% if candidate.stage == 0 %}Email 1{% else %}Follow-up {{ candidate.stage }}{% endif %}

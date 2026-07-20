@@ -110,7 +110,13 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         row[0]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
-    assert {"schema_migrations", "app_state", "leads", "sends"}.issubset(tables)
+    assert {
+        "schema_migrations",
+        "app_state",
+        "candidates",
+        "leads",
+        "sends",
+    }.issubset(tables)
     migrations = conn.execute(
         "SELECT version, length(checksum) FROM schema_migrations ORDER BY version"
     ).fetchall()
@@ -119,7 +125,47 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         ("002", 64),
         ("003", 64),
         ("004", 64),
+        ("005", 64),
     ]
+
+
+def test_unverified_directory_candidate_is_staged_without_becoming_a_lead(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+
+    candidate_id = conn.execute(
+        """
+        INSERT INTO candidates (
+            source_register, source_url, company_name, source_location,
+            source_record_hash, discovered_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "LCA member directory",
+            "https://www.legionellacontrolassociation.co.uk/company/example-limited/",
+            "Example Limited",
+            "London",
+            "a" * 64,
+            "2026-07-20T14:00:00+00:00",
+            "2026-07-20T14:00:00+00:00",
+        ),
+    ).lastrowid
+
+    candidate = conn.execute(
+        "SELECT status FROM candidates WHERE id = ?", (candidate_id,)
+    ).fetchone()
+    assert candidate[0] == "discovered"
+    candidate_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(candidates)")
+    }
+    assert not {
+        "company_number",
+        "contact_email",
+        "eligible",
+        "lead_id",
+        "promoted",
+    }.intersection(candidate_columns)
+    assert conn.execute("SELECT count(*) FROM leads").fetchone()[0] == 0
 
 
 def test_migration_refuses_checksum_mismatch(tmp_path):

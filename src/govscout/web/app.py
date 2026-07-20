@@ -76,11 +76,19 @@ def create_app(
         conn = conn_factory()
         try:
             decision = guard.status(conn, now=clock())
+            staged_candidates = conn.execute(
+                """
+                SELECT id, status, company_name, source_location, source_url
+                FROM candidates
+                ORDER BY id
+                LIMIT 50
+                """
+            ).fetchall()
         finally:
             conn.close()
-        candidates = []
+        due_candidates = []
         if candidate_source is not None:
-            candidates = sorted(
+            due_candidates = sorted(
                 candidate_source.due(),
                 key=lambda item: (item.stage == 0, item.lead_id),
             )
@@ -90,7 +98,8 @@ def create_app(
             decision=decision,
             drafting_locked=drafting_locked,
             csrf_token=session["csrf_token"],
-            candidates=candidates,
+            due_candidates=due_candidates,
+            staged_candidates=staged_candidates,
         )
 
     @app.post("/today/draft/<int:lead_id>")
