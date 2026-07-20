@@ -1,9 +1,9 @@
 from datetime import UTC, datetime
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from govscout.companies_house import verified_company_from_profile
 from govscout.config import load_settings
 from govscout.db import connect_database, insert_verified_lead, migrate
 from govscout.draft_service import (
@@ -13,6 +13,9 @@ from govscout.draft_service import (
 )
 from govscout.policy import LintNotReadyPolicy, PolicyResult
 from govscout.sendguard import ReservationRequest, SendGuard
+from tests.support import (
+    verified_company_from_test_profile as verified_company_from_profile,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -138,6 +141,27 @@ def test_passing_policy_creates_plain_review_draft_and_finalises_ledger(tmp_path
         "SELECT state, gmail_draft_id, gmail_message_id, gmail_thread_id FROM sends"
     ).fetchone()
     assert tuple(row) == ("draft", "draft-1", "message-1", "thread-1")
+
+
+def test_orchestration_passes_only_canonical_recipient_to_gmail(tmp_path):
+    conn, request = _setup(tmp_path)
+    gmail = RecordingGmailDrafts()
+    service = DraftService(
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        policy=AllowPolicy(),
+        gmail=gmail,
+    )
+
+    result = service.create_review_draft(
+        conn,
+        replace(request, to_email=" Director@Example.Test "),
+        now=datetime(2026, 7, 21, 8, 30, tzinfo=UTC),
+    )
+
+    assert gmail.create_calls[0]["to_email"] == "director@example.test"
+    assert conn.execute(
+        "SELECT to_email FROM sends WHERE id = ?", (result.send_id,)
+    ).fetchone()[0] == "director@example.test"
 
 
 def test_ambiguous_gmail_failure_keeps_reservation_counted_and_records_error(tmp_path):

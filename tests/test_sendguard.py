@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from govscout.companies_house import verified_company_from_profile
 from govscout.config import load_settings
 from govscout.db import connect_database, insert_verified_lead, migrate
 from govscout.sendguard import (
@@ -13,6 +12,9 @@ from govscout.sendguard import (
     ReservationRequest,
     SendGuard,
     SendLimitExceeded,
+)
+from tests.support import (
+    verified_company_from_test_profile as verified_company_from_profile,
 )
 
 
@@ -46,6 +48,55 @@ def _request(lead_id: int, number: int) -> ReservationRequest:
         subject="your privacy notice and AI",
         body=f"A compliant test body for lead {number}.",
     )
+
+
+def test_sendguard_rejects_duck_typed_or_reassigned_safety_settings():
+    settings = load_settings(ROOT / "config/default.toml")
+
+    class UnsafeSettings:
+        timezone = "UTC"
+        warmup = ((14, 500),)
+        hard_limit = 500
+
+    with pytest.raises(TypeError, match="Settings"):
+        SendGuard(UnsafeSettings())
+
+    guard = SendGuard(settings)
+    with pytest.raises(AttributeError, match="immutable"):
+        guard.settings = UnsafeSettings()
+    with pytest.raises(AttributeError, match="immutable"):
+        guard.timezone = UTC
+    with pytest.raises(AttributeError):
+        object.__setattr__(guard, "_settings", UnsafeSettings())
+
+    object.__setattr__(settings, "hard_limit", 999)
+    object.__setattr__(settings, "soft_limit", 999)
+    object.__setattr__(settings, "sender_email", "attacker@example.test")
+
+    assert guard.sender_email == "harrison@misegroup.co.uk"
+    assert guard.sender_name == "Harrison — Mise"
+    assert guard._effective_hard_limit(1) == 5
+
+
+def test_sendguard_rejects_unvalidated_exact_settings_instance():
+    settings = object.__new__(type(load_settings(ROOT / "config/default.toml")))
+    unsafe_values = {
+        "sender_email": "attacker@example.test",
+        "sender_name": "Attacker",
+        "soft_limit": 999,
+        "hard_limit": 999,
+        "warmup": ((14, 999), (28, 999)),
+        "window_uk": (0, 24),
+        "preferred_weekdays": (1, 2, 3, 4, 5, 6, 7),
+        "followups_first": False,
+        "followup_days": (1,),
+        "timezone": "UTC",
+    }
+    for field_name, value in unsafe_values.items():
+        object.__setattr__(settings, field_name, value)
+
+    with pytest.raises(ValueError, match="fixed P1 contract"):
+        SendGuard(settings)
 
 
 def test_first_warmup_day_allows_five_reservations_and_blocks_sixth(tmp_path):
@@ -163,13 +214,33 @@ def test_same_reservation_is_idempotent_but_changed_content_conflicts(tmp_path):
         guard.reserve(conn, replace(request, subject="changed subject"), now=now)
 
 
-def test_reservation_recipient_must_match_verified_lead_contact(tmp_path):
+def test_reservation_rejects_multi_recipient_before_capacity(tmp_path):
     conn = connect_database(tmp_path / "govscout.sqlite3")
     migrate(conn)
     guard = SendGuard(load_settings(ROOT / "config/default.toml"))
     request = replace(
         _request(_lead(conn, 1), 1),
         to_email="unrelated-person@example.test, second-person@example.test",
+    )
+
+    with pytest.raises(ReservationConflict, match="one valid address"):
+        guard.reserve(
+            conn,
+            request,
+            now=datetime(2026, 7, 21, 8, 30, tzinfo=UTC),
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM sends").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM app_state").fetchone()[0] == 0
+
+
+def test_reservation_recipient_must_match_verified_lead_contact(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    guard = SendGuard(load_settings(ROOT / "config/default.toml"))
+    request = replace(
+        _request(_lead(conn, 1), 1),
+        to_email="unrelated-person@example.test",
     )
 
     with pytest.raises(ReservationConflict, match="verified lead contact"):

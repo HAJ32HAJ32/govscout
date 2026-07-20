@@ -148,9 +148,9 @@ class DraftService:
 
         try:
             gmail_result = self.gmail.create_draft(
-                to_email=request.to_email,
-                from_email=self.guard.settings.sender_email,
-                from_name=self.guard.settings.sender_name,
+                to_email=reservation.to_email,
+                from_email=self.guard.sender_email,
+                from_name=self.guard.sender_name,
                 subject=request.subject,
                 body=request.body,
                 ledger_id=reservation.send_id,

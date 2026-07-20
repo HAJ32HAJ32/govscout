@@ -5,6 +5,8 @@ from email.message import EmailMessage
 from email.utils import formataddr
 from typing import Any
 
+from govscout.email_address import normalise_single_recipient
+
 
 EXPECTED_SENDER_EMAIL = "harrison@misegroup.co.uk"
 EXPECTED_SENDER_NAME = "Harrison — Mise"
@@ -25,17 +27,6 @@ class GmailDraftAdapter:
     def _reject_header_injection(value: str, field: str) -> None:
         if "\r" in value or "\n" in value:
             raise ValueError(f"{field} contains a newline")
-
-    @staticmethod
-    def _single_recipient(value: str) -> str:
-        recipient = value.strip().lower()
-        if (
-            recipient.count("@") != 1
-            or any(character in recipient for character in "\r\n,; \t")
-            or not all(recipient.split("@", 1))
-        ):
-            raise ValueError("to_email must be a single recipient address")
-        return recipient
 
     def _verify_authenticated_profile(self) -> None:
         if self._profile_verified:
@@ -114,7 +105,7 @@ class GmailDraftAdapter:
             raise SenderMismatch("draft sender email is not the fixed Mise sender")
         if from_name.strip() != EXPECTED_SENDER_NAME:
             raise SenderMismatch("draft sender name is not the fixed Mise sender")
-        recipient = self._single_recipient(to_email)
+        recipient = normalise_single_recipient(to_email)
         self._reject_header_injection(subject, "subject")
         self._verify_authenticated_profile()
 

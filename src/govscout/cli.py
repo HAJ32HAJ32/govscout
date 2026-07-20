@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 from datetime import UTC, datetime
-from ipaddress import ip_address, ip_network
 import os
 from pathlib import Path
 import sqlite3
@@ -23,11 +22,10 @@ from govscout.sendguard import (
     SendGuard,
     SendLimitExceeded,
 )
+from govscout.web_hosts import canonical_safe_bind_host
 
 
 ROOT = Path(__file__).resolve().parents[2]
-TAILSCALE_IPV4 = ip_network("100.64.0.0/10")
-TAILSCALE_IPV6 = ip_network("fd7a:115c:a1e0::/48")
 
 
 class CandidateSource(Protocol):
@@ -37,16 +35,12 @@ class CandidateSource(Protocol):
 
 
 def _validate_web_host(host: str) -> str:
-    candidate = host.strip().lower()
-    if candidate == "localhost":
-        return candidate
     try:
-        address = ip_address(candidate)
+        return canonical_safe_bind_host(host)
     except ValueError as exc:
-        raise SystemExit("web host must be loopback or Tailscale-only") from exc
-    if address.is_loopback or address in TAILSCALE_IPV4 or address in TAILSCALE_IPV6:
-        return candidate
-    raise SystemExit("web host must be loopback or Tailscale-only")
+        raise SystemExit(
+            "web host must be a loopback or Tailscale IP literal"
+        ) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -175,7 +169,10 @@ def main(
         except (DraftOutcomeUncertain, DraftAlreadySent, ReservationConflict) as exc:
             print(f"Draft refused: {exc}")
             return 4
-        print(f"Draft created: ledger {result.send_id}, Gmail draft {result.draft_id}")
+        outcome = "created" if result.created else "reused"
+        print(
+            f"Draft {outcome}: ledger {result.send_id}, Gmail draft {result.draft_id}"
+        )
         return 0
 
     if args.command == "draft-batch":

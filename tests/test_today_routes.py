@@ -1,13 +1,18 @@
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
-from govscout.companies_house import verified_company_from_profile
+import pytest
+
 from govscout.config import load_settings
 from govscout.db import connect_database, insert_verified_lead, migrate
 from govscout.draft_service import DraftOutcomeUncertain, DraftService
 from govscout.policy import PolicyResult
 from govscout.sendguard import ReservationRequest, SendGuard
 from govscout.web.app import create_app
+from tests.support import (
+    verified_company_from_test_profile as verified_company_from_profile,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +54,18 @@ class StaticCandidates:
 class UncertainDraftService:
     def create_review_draft(self, conn, request, *, now):
         raise DraftOutcomeUncertain("manual reconciliation required")
+
+
+class ReturningDraftService:
+    def __init__(self, *, created):
+        self.created = created
+
+    def create_review_draft(self, conn, request, *, now):
+        return SimpleNamespace(
+            created=self.created,
+            draft_id="draft-1",
+            send_id=1,
+        )
 
 
 def test_today_shows_authoritative_counter_and_fail_closed_lint_lock(tmp_path):
@@ -165,6 +182,45 @@ def test_today_reports_ambiguous_draft_outcome_as_controlled_conflict(tmp_path):
     assert response.get_json() == {
         "error": "draft_conflict",
         "detail": "manual reconciliation required",
+    }
+
+
+@pytest.mark.parametrize(("created", "expected_status"), [(True, 201), (False, 200)])
+def test_today_single_draft_reports_created_or_reused_accurately(
+    tmp_path,
+    created,
+    expected_status,
+):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    conn.close()
+    request = ReservationRequest(
+        lead_id=1,
+        to_email="director@example.test",
+        stage=0,
+        template="signal-led",
+        subject="subject",
+        body="body",
+    )
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        draft_service=ReturningDraftService(created=created),
+        candidate_source=StaticCandidates([request]),
+    )
+    client = app.test_client()
+    client.get("/today")
+    with client.session_transaction() as session:
+        token = session["csrf_token"]
+
+    response = client.post("/today/draft/1", headers={"X-CSRF-Token": token})
+
+    assert response.status_code == expected_status
+    assert response.get_json() == {
+        "created": created,
+        "draft_id": "draft-1",
+        "send_id": 1,
     }
 
 

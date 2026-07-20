@@ -7,14 +7,13 @@ import os
 from pathlib import Path
 import sqlite3
 
-from govscout.companies_house import VerifiedCompany
+from govscout.companies_house import VerifiedCompany, is_verified_company
+from govscout.email_address import normalise_single_recipient
 
 
 ALLOWED_LEGAL_FORMS = frozenset(
     {"ltd", "plc", "llp", "cic", "charitable_company"}
 )
-MIGRATION_VERSION = "001"
-MIGRATION_NAME = "001_p1_ledger_and_core_leads.sql"
 
 
 def connect_database(path: str | Path) -> sqlite3.Connection:
@@ -39,12 +38,23 @@ def connect_database(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def _migration_text() -> str:
-    return (
-        resources.files("govscout.resources")
-        .joinpath("migrations", MIGRATION_NAME)
-        .read_text(encoding="utf-8")
-    )
+def _migration_texts() -> tuple[tuple[str, str, str], ...]:
+    directory = resources.files("govscout.resources").joinpath("migrations")
+    migrations: list[tuple[str, str, str]] = []
+    versions: set[str] = set()
+    for migration in sorted(directory.iterdir(), key=lambda item: item.name):
+        if not migration.name.endswith(".sql"):
+            continue
+        version, separator, _description = migration.name.partition("_")
+        if not separator or not version.isdigit() or version in versions:
+            raise RuntimeError(f"invalid or duplicate migration name: {migration.name}")
+        versions.add(version)
+        migrations.append(
+            (version, migration.name, migration.read_text(encoding="utf-8"))
+        )
+    if not migrations:
+        raise RuntimeError("no database migrations found")
+    return tuple(migrations)
 
 
 def _statements(sql: str):
@@ -61,8 +71,7 @@ def _statements(sql: str):
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    sql = _migration_text()
-    checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+    migrations = _migration_texts()
     try:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(
@@ -77,39 +86,32 @@ def migrate(conn: sqlite3.Connection) -> None:
             )
             """
         )
-        row = conn.execute(
-            "SELECT checksum FROM schema_migrations WHERE version = ?",
-            (MIGRATION_VERSION,),
-        ).fetchone()
-        if row:
-            if row[0] != checksum:
-                raise RuntimeError("migration checksum mismatch for version 001")
-            conn.execute("COMMIT")
-            return
-        for statement in _statements(sql):
-            conn.execute(statement)
-        conn.execute(
-            "INSERT INTO schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)",
-            (MIGRATION_VERSION, checksum, datetime.now(UTC).isoformat()),
-        )
+        for version, _name, sql in migrations:
+            checksum = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+            row = conn.execute(
+                "SELECT checksum FROM schema_migrations WHERE version = ?",
+                (version,),
+            ).fetchone()
+            if row:
+                if row[0] != checksum:
+                    raise RuntimeError(
+                        f"migration checksum mismatch for version {version}"
+                    )
+                continue
+            for statement in _statements(sql):
+                conn.execute(statement)
+            conn.execute(
+                """
+                INSERT INTO schema_migrations (version, checksum, applied_at)
+                VALUES (?, ?, ?)
+                """,
+                (version, checksum, datetime.now(UTC).isoformat()),
+            )
         conn.execute("COMMIT")
     except Exception:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
-
-
-def _single_recipient_email(value: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError("contact_email must be a single recipient address")
-    email = value.strip().lower()
-    if (
-        email.count("@") != 1
-        or any(character in email for character in "\r\n,; \t")
-        or not all(email.split("@", 1))
-    ):
-        raise ValueError("contact_email must be a single recipient address")
-    return email
 
 
 def insert_verified_lead(
@@ -122,13 +124,13 @@ def insert_verified_lead(
     eu_facing: bool = False,
     now: datetime | None = None,
 ) -> int:
-    if not isinstance(company, VerifiedCompany):
+    if not is_verified_company(company):
         raise TypeError("company must be verified Companies House evidence")
     if company.legal_form not in ALLOWED_LEGAL_FORMS:
         raise ValueError("only incorporated legal forms may enter GovScout")
     if company.verification_source != "companies_house_api":
         raise ValueError("Companies House API verification is required")
-    normalized_email = _single_recipient_email(contact_email)
+    normalized_email = normalise_single_recipient(contact_email)
     if not source_register.strip():
         raise ValueError("source_register is required")
 

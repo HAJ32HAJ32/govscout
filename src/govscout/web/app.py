@@ -21,6 +21,7 @@ from govscout.sendguard import (
     SendGuard,
     SendLimitExceeded,
 )
+from govscout.web_hosts import canonical_safe_bind_host, parse_host_header
 
 
 class CandidateSource(Protocol):
@@ -51,19 +52,13 @@ def create_app(
         "localhost",
         "127.0.0.1",
         "::1",
-        *(host.strip().lower() for host in trusted_hosts),
+        *(canonical_safe_bind_host(host) for host in trusted_hosts),
     }
 
     @app.before_request
     def protect_state_changes():
-        host_header = request.host.lower()
-        if host_header.startswith("["):
-            closing_bracket = host_header.find("]")
-            hostname = host_header[1:closing_bracket] if closing_bracket > 0 else ""
-        elif host_header.count(":") == 1:
-            hostname = host_header.split(":", 1)[0]
-        else:
-            hostname = host_header
+        host_header = request.environ.get("HTTP_HOST", "")
+        hostname = parse_host_header(host_header)
         if hostname not in allowed_hosts:
             abort(400)
         if "csrf_token" not in session:
@@ -119,7 +114,15 @@ def create_app(
             return jsonify(error="draft_conflict", detail=str(exc)), 409
         finally:
             conn.close()
-        return jsonify(draft_id=result.draft_id, send_id=result.send_id), 201
+        status_code = 201 if result.created else 200
+        return (
+            jsonify(
+                created=result.created,
+                draft_id=result.draft_id,
+                send_id=result.send_id,
+            ),
+            status_code,
+        )
 
     @app.post("/today/drafts")
     def draft_batch():

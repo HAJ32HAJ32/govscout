@@ -13,6 +13,7 @@ from govscout.cli import (
 from govscout.config import load_settings
 from govscout.db import connect_database, migrate
 from govscout.sendguard import SendGuard
+from govscout.web_hosts import parse_host_header
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,7 +47,7 @@ def test_default_dependencies_work_without_source_checkout(monkeypatch, tmp_path
     conn, guard = _default_dependencies()
 
     try:
-        assert guard.settings.sender_email == "harrison@misegroup.co.uk"
+        assert guard.sender_email == "harrison@misegroup.co.uk"
         assert database.exists()
     finally:
         conn.close()
@@ -90,13 +91,30 @@ def test_locked_web_runtime_is_local_only_and_requires_no_gmail(monkeypatch, tmp
 
 def test_web_host_allows_loopback_and_tailscale_only():
     assert _validate_web_host("127.0.0.1") == "127.0.0.1"
-    assert _validate_web_host("localhost") == "localhost"
+    assert _validate_web_host("::1") == "::1"
+    assert _validate_web_host("100.64.0.0") == "100.64.0.0"
+    assert _validate_web_host("100.127.255.255") == "100.127.255.255"
     assert _validate_web_host("100.72.212.14") == "100.72.212.14"
     assert _validate_web_host("fd7a:115c:a1e0::3601:d4ab") == (
         "fd7a:115c:a1e0::3601:d4ab"
     )
+    assert _validate_web_host("fd7a:115c:a1e0:0:0:0:3601:d4ab") == (
+        "fd7a:115c:a1e0::3601:d4ab"
+    )
 
-    for unsafe in ("0.0.0.0", "::", "192.168.1.10", "8.8.8.8", "example.com"):
+    for unsafe in (
+        "localhost",
+        "0.0.0.0",
+        "::",
+        "100.63.255.255",
+        "100.128.0.0",
+        "fd7a:115c:a1df:ffff::1",
+        "fd7a:115c:a1e1::1",
+        "fd7a:115c:a1e0::1%lo",
+        "192.168.1.10",
+        "8.8.8.8",
+        "example.com",
+    ):
         with pytest.raises(SystemExit, match="loopback or Tailscale"):
             _validate_web_host(unsafe)
 
@@ -110,7 +128,7 @@ def test_locked_web_runtime_accepts_only_configured_tailscale_host(
     app = build_locked_web_app(trusted_hosts=("100.72.212.14",))
     app.testing = True
 
-    accepted = app.test_client().get(
+    accepted_ipv4 = app.test_client().get(
         "/today",
         headers={"Host": "100.72.212.14:8766"},
     )
@@ -119,5 +137,52 @@ def test_locked_web_runtime_accepts_only_configured_tailscale_host(
         headers={"Host": "attacker.example"},
     )
 
-    assert accepted.status_code == 200
+    assert accepted_ipv4.status_code == 200
     assert rejected.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "host_header",
+    [
+        "100.72.212.14:bad",
+        "100.72.212.14:0",
+        "100.72.212.14:8766.evil",
+        "[100.72.212.14]",
+        "[100.72.212.14]attacker.example",
+        "[::1]evil",
+        "[fd7a:115c:a1e0::3601:d4ab]:bad",
+        "fd7a:115c:a1e0::3601:d4ab",
+    ],
+)
+def test_locked_web_runtime_rejects_malformed_host_headers(
+    monkeypatch,
+    tmp_path,
+    host_header,
+):
+    monkeypatch.setenv("GOVSCOUT_DATABASE", str(tmp_path / "govscout.sqlite3"))
+    app = build_locked_web_app(
+        trusted_hosts=("100.72.212.14", "fd7a:115c:a1e0::3601:d4ab")
+    )
+
+    response = app.test_client(use_cookies=False).get(
+        "/today", headers={"Host": host_header}
+    )
+
+    assert response.status_code == 400
+
+
+def test_raw_host_parser_rejects_out_of_range_ports():
+    assert parse_host_header("100.72.212.14:65536") is None
+    assert parse_host_header("[fd7a:115c:a1e0::3601:d4ab]:65536") is None
+
+
+def test_locked_web_runtime_canonicalises_equivalent_ipv6_host(tmp_path, monkeypatch):
+    monkeypatch.setenv("GOVSCOUT_DATABASE", str(tmp_path / "govscout.sqlite3"))
+    app = build_locked_web_app(trusted_hosts=("fd7a:115c:a1e0::3601:d4ab",))
+
+    response = app.test_client().get(
+        "/today",
+        headers={"Host": "[fd7a:115c:a1e0:0:0:0:3601:d4ab]:8766"},
+    )
+
+    assert response.status_code == 200

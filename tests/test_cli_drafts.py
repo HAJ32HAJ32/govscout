@@ -2,12 +2,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from govscout.cli import main
-from govscout.companies_house import verified_company_from_profile
 from govscout.config import load_settings
 from govscout.db import connect_database, insert_verified_lead, migrate
 from govscout.draft_service import DraftService
 from govscout.policy import PolicyResult
 from govscout.sendguard import ReservationRequest, SendGuard
+from tests.support import (
+    verified_company_from_test_profile as verified_company_from_profile,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -159,3 +161,23 @@ def test_cli_batch_retry_reports_existing_draft_without_counting_it_as_new(
     output = capsys.readouterr().out
     assert "Batch drafted 1; rolled over 0" in output
     assert "Batch drafted 0; rolled over 0" in output
+
+
+def test_cli_single_retry_reports_reused_draft(tmp_path, capsys):
+    conn, guard, gmail, service, candidates, lead_id = _dependencies(tmp_path)
+    now = datetime(2026, 7, 21, 8, 30, tzinfo=UTC)
+
+    for _ in range(2):
+        assert main(
+            ["draft", str(lead_id)],
+            conn=conn,
+            guard=guard,
+            draft_service=service,
+            candidate_source=candidates,
+            now=now,
+        ) == 0
+
+    assert len(gmail.created) == 1
+    output = capsys.readouterr().out
+    assert output.count("Draft created:") == 1
+    assert output.count("Draft reused:") == 1

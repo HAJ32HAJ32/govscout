@@ -73,9 +73,9 @@ TS_IP=$(tailscale ip -4)
 govscout web --host "$TS_IP" --port 8766
 ```
 
-GovScout accepts only loopback or Tailscale address ranges; wildcard, LAN and public-IP binds are refused. Requests must also carry a Host header explicitly trusted for that process. `/today` displays capacity, warnings, lock state and the due worklist; POST actions are protected by session CSRF tokens and repeat policy/sendguard checks server-side.
+GovScout accepts only IP literals in loopback or Tailscale address ranges. Hostnames (including `localhost`), scoped IPv6 addresses, wildcard, LAN and public-IP binds are refused. Requests must also carry a strictly parsed Host header explicitly trusted for that process. `/today` displays capacity, warnings, lock state and the due worklist; POST actions are protected by session CSRF tokens and repeat policy/sendguard checks server-side.
 
-A hardened user-service template is provided at `deploy/govscout.service`. On the Mise VPS it runs continuously at `http://100.72.212.14:8766/today`, reachable only from H's tailnet. Tailscale is the access gate; GovScout does not expose this port on the public interface.
+A hardened user-service template is provided at `deploy/govscout.service`. Before enabling it on a fresh host, create its private data directory with `install -d -m 700 ~/.local/share/govscout`. On the Mise VPS it runs continuously at `http://100.72.212.14:8766/today`, reachable only from H's tailnet. Tailscale is the access gate; GovScout does not expose this port on the public interface.
 
 ## Packaging
 
