@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>GovScout — Today</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 58rem; padding: 0 1rem; color: #17202a; }
+    .banner { border: 2px solid #275d38; border-radius: .75rem; padding: 1rem; background: #f3faf5; }
+    .locked { margin-top: 1rem; border-left: .35rem solid #a23b2a; padding: .75rem 1rem; background: #fff4f1; }
+    .worklist { margin-top: 1.5rem; }
+    .candidate { border: 1px solid #d8dee4; border-radius: .6rem; margin: .65rem 0; padding: .8rem; }
+    .candidate form { display: inline; }
+    button { cursor: pointer; padding: .45rem .7rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>GovScout — Today</h1>
+    <section class="banner" aria-label="Daily draft limit">
+      <strong>{{ counter }}</strong>
+      {% for message in decision.messages %}<p>{{ message }}</p>{% endfor %}
+    </section>
+    {% if drafting_locked %}
+    <section class="locked" role="status">
+      <strong>Production drafting locked: LINT_NOT_READY</strong>
+      <p>No Gmail draft can be created until the complete GovScout lint suite is installed.</p>
+    </section>
+    {% endif %}
+
+    <section class="worklist" aria-labelledby="worklist-title">
+      <h2 id="worklist-title">Review worklist</h2>
+      {% if candidates %}
+        {% if not drafting_locked %}
+        <form action="/today/drafts" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">Create all review drafts within today’s limit</button>
+        </form>
+        {% endif %}
+        <ol>
+        {% for candidate in candidates %}
+          <li class="candidate">
+            <strong>Lead {{ candidate.lead_id }}</strong>
+            — {% if candidate.stage == 0 %}Email 1{% else %}Follow-up {{ candidate.stage }}{% endif %}
+            — {{ candidate.to_email }}
+            {% if not drafting_locked %}
+            <form action="/today/draft/{{ candidate.lead_id }}" method="post">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit">Create review draft</button>
+            </form>
+            {% endif %}
+          </li>
+        {% endfor %}
+        </ol>
+      {% else %}
+        <p>No due candidates are available.</p>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

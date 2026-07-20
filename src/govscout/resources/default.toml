@@ -1,0 +1,13 @@
+[sender]
+email = "harrison@misegroup.co.uk"
+name = "Harrison — Mise"
+
+[send]
+soft_limit = 10
+hard_limit = 15
+warmup = [[14, 5], [28, 8]]
+window_uk = [8, 11]
+preferred_weekdays = [2, 3, 4]
+followups_first = true
+followup_days = [4, 12, 25]
+timezone = "Europe/London"

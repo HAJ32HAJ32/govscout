@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "govscout"
+version = "0.1.0"
+description = "Review-first AI governance outreach engine for Mise"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "Flask>=3.0,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "pytest-cov>=5,<7",
+  "ruff>=0.9,<1",
+]
+gmail = [
+  "google-api-python-client>=2.0,<3",
+  "google-auth>=2.0,<3",
+]
+
+[project.scripts]
+govscout = "govscout.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"govscout.resources" = ["*.toml", "migrations/*.sql"]
+"govscout.web" = ["templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
