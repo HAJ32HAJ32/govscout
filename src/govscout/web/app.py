@@ -37,6 +37,7 @@ def create_app(
     draft_service: DraftService | None = None,
     candidate_source: CandidateSource | None = None,
     csrf_secret: bytes | str | None = None,
+    trusted_hosts: tuple[str, ...] = (),
 ) -> Flask:
     app = Flask(__name__)
     app.secret_key = csrf_secret or secrets.token_bytes(32)
@@ -46,17 +47,24 @@ def create_app(
     )
     clock = now_provider or (lambda: datetime.now(UTC))
     drafting_locked = draft_service is None or candidate_source is None
+    allowed_hosts = {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        *(host.strip().lower() for host in trusted_hosts),
+    }
 
     @app.before_request
     def protect_state_changes():
-        host = request.host.lower()
-        trusted_host = (
-            host in {"localhost", "127.0.0.1", "[::1]"}
-            or host.startswith("localhost:")
-            or host.startswith("127.0.0.1:")
-            or host.startswith("[::1]:")
-        )
-        if not trusted_host:
+        host_header = request.host.lower()
+        if host_header.startswith("["):
+            closing_bracket = host_header.find("]")
+            hostname = host_header[1:closing_bracket] if closing_bracket > 0 else ""
+        elif host_header.count(":") == 1:
+            hostname = host_header.split(":", 1)[0]
+        else:
+            hostname = host_header
+        if hostname not in allowed_hosts:
             abort(400)
         if "csrf_token" not in session:
             session["csrf_token"] = secrets.token_urlsafe(32)

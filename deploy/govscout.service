@@ -1,0 +1,23 @@
+[Unit]
+Description=GovScout review surface (Tailscale only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/govscout
+Environment=GOVSCOUT_DATABASE=%h/.local/share/govscout/govscout.sqlite3
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/bash -lc 'TS_IP=$(/usr/bin/tailscale ip -4 2>/dev/null | /usr/bin/head -n1); if [ -z "$TS_IP" ]; then echo "No Tailscale IPv4 found" >&2; exit 1; fi; exec %h/govscout/.venv/bin/python -m govscout.cli web --host "$TS_IP" --port 8766'
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/govscout
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

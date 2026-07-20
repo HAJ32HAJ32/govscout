@@ -54,7 +54,7 @@ Draft-adjacent commands show the same authoritative capacity counter used by the
 
 ## Local review interface
 
-Run the P1 surface on loopback only:
+Run the P1 surface on loopback by default:
 
 ```bash
 govscout web
@@ -66,7 +66,16 @@ Then open:
 http://127.0.0.1:5000/today
 ```
 
-Use `govscout web --port 5050` to select another local port. The command cannot bind to a public interface. `/today` displays capacity, warnings, lock state and the due worklist; POST actions are protected by session CSRF tokens and repeat policy/sendguard checks server-side.
+Use `govscout web --port 5050` to select another local port. For private access from another device on the same tailnet, bind directly to the VPS's Tailscale address:
+
+```bash
+TS_IP=$(tailscale ip -4)
+govscout web --host "$TS_IP" --port 8766
+```
+
+GovScout accepts only loopback or Tailscale address ranges; wildcard, LAN and public-IP binds are refused. Requests must also carry a Host header explicitly trusted for that process. `/today` displays capacity, warnings, lock state and the due worklist; POST actions are protected by session CSRF tokens and repeat policy/sendguard checks server-side.
+
+A hardened user-service template is provided at `deploy/govscout.service`. On the Mise VPS it runs continuously at `http://100.72.212.14:8766/today`, reachable only from H's tailnet. Tailscale is the access gate; GovScout does not expose this port on the public interface.
 
 ## Packaging
 

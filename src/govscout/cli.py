@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import UTC, datetime
+from ipaddress import ip_address, ip_network
 import os
 from pathlib import Path
 import sqlite3
@@ -25,12 +26,27 @@ from govscout.sendguard import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+TAILSCALE_IPV4 = ip_network("100.64.0.0/10")
+TAILSCALE_IPV6 = ip_network("fd7a:115c:a1e0::/48")
 
 
 class CandidateSource(Protocol):
     def get(self, lead_id: int) -> ReservationRequest: ...
 
     def due(self) -> list[ReservationRequest]: ...
+
+
+def _validate_web_host(host: str) -> str:
+    candidate = host.strip().lower()
+    if candidate == "localhost":
+        return candidate
+    try:
+        address = ip_address(candidate)
+    except ValueError as exc:
+        raise SystemExit("web host must be loopback or Tailscale-only") from exc
+    if address.is_loopback or address in TAILSCALE_IPV4 or address in TAILSCALE_IPV6:
+        return candidate
+    raise SystemExit("web host must be loopback or Tailscale-only")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,7 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("draft-batch", help="create due review drafts within capacity")
     undo = subparsers.add_parser("send-undo", help="delete a Gmail draft and void its ledger row")
     undo.add_argument("send_id", type=int)
-    web = subparsers.add_parser("web", help="run the locked local review interface")
+    web = subparsers.add_parser("web", help="run the locked private review interface")
+    web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=5000)
     return parser
 
@@ -82,7 +99,7 @@ def _default_dependencies() -> tuple[sqlite3.Connection, SendGuard]:
     return conn, SendGuard(settings)
 
 
-def build_locked_web_app():
+def build_locked_web_app(*, trusted_hosts: tuple[str, ...] = ()):
     from govscout.web.app import create_app
 
     database = _default_database_path()
@@ -94,6 +111,7 @@ def build_locked_web_app():
     return create_app(
         conn_factory=lambda: connect_database(database),
         guard=SendGuard(_default_settings()),
+        trusted_hosts=trusted_hosts,
     )
 
 
@@ -110,10 +128,12 @@ def main(
     if args.command == "web":
         if not 1 <= args.port <= 65535:
             raise SystemExit("port must be between 1 and 65535")
-        app = build_locked_web_app()
-        print(f"GovScout review surface: http://127.0.0.1:{args.port}/today")
+        web_host = _validate_web_host(args.host)
+        app = build_locked_web_app(trusted_hosts=(web_host,))
+        display_host = f"[{web_host}]" if ":" in web_host else web_host
+        print(f"GovScout review surface: http://{display_host}:{args.port}/today")
         app.run(
-            host="127.0.0.1",
+            host=web_host,
             port=args.port,
             debug=False,
             use_reloader=False,
