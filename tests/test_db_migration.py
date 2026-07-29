@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+import hashlib
 import os
 import sqlite3
 
@@ -7,6 +8,8 @@ import pytest
 from govscout.companies_house import VerifiedCompany
 from govscout.db import (
     ALLOWED_LEGAL_FORMS,
+    _migration_texts,
+    _statements,
     connect_database,
     insert_verified_lead,
     migrate,
@@ -35,6 +38,33 @@ def _lead(conn, number="12345678"):
         contact_email=f"director-{number}@example.test",
         source_register="LCA member directory",
     )
+
+
+def _migrate_through_007(conn):
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        """
+        CREATE TABLE schema_migrations (
+            version TEXT PRIMARY KEY,
+            checksum TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )
+        """
+    )
+    for version, _name, sql in _migration_texts():
+        if version == "008":
+            break
+        for statement in _statements(sql):
+            conn.execute(statement)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)",
+            (
+                version,
+                hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+                "2026-07-29T09:00:00+00:00",
+            ),
+        )
+    conn.execute("COMMIT")
 
 
 def _insert_send_in_state(conn, lead_id, state):
@@ -134,6 +164,8 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         ("004", 64),
         ("005", 64),
         ("006", 64),
+        ("007", 64),
+        ("008", 64),
     ]
 
 
@@ -237,6 +269,11 @@ def test_fca_source_url_must_exactly_match_its_frn(tmp_path, source_url):
         "https:///missing-host",
         "https://example.com:443/",
         "https://example.com:8443/",
+        "https://-bad.example/",
+        "https://bad-.example/",
+        "https://bad..example/",
+        "https://.bad.example/",
+        "https://bad.example./",
     ],
 )
 def test_fca_website_url_rejects_ambiguous_or_unsafe_direct_sql(tmp_path, website_url):
@@ -259,6 +296,84 @@ def test_fca_website_url_rejects_ambiguous_or_unsafe_direct_sql(tmp_path, websit
                 "2026-07-25T10:00:00+00:00",
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "legacy_website",
+    [
+        "https://EXAMPLE.com/",
+        "https://-bad.example/",
+        "https://bad-.example/",
+        "https://bad..example/",
+        "https://.bad.example/",
+        "https://bad.example./",
+        "https://bad_host.example/",
+        "https://bad~host.example/",
+        f"https://{'a' * 64}.example/",
+        f"https://{'.'.join(['a' * 63] * 4)}/",
+    ],
+)
+def test_migration_008_refuses_legacy_noncanonical_website_and_rolls_back(
+    tmp_path, legacy_website
+):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    _migrate_through_007(conn)
+    conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url, website_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example', 'Authorised', 1, ?, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            legacy_website,
+            "a" * 64,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:00:00+00:00",
+        ),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        migrate(conn)
+
+    assert conn.execute(
+        "SELECT count(*) FROM schema_migrations WHERE version = '008'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'fca_website_canonical_insert'"
+    ).fetchone()[0] == 0
+
+
+def test_migration_008_refuses_legacy_linked_company_mismatch_and_rolls_back(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    _migrate_through_007(conn)
+    lead_id = _lead(conn, "12345678")
+    conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url, company_number,
+            lead_id, source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example', 'Authorised', 1, ?, '87654321', ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            lead_id,
+            "a" * 64,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:00:00+00:00",
+        ),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        migrate(conn)
+
+    assert conn.execute(
+        "SELECT count(*) FROM schema_migrations WHERE version = '008'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'fca_lead_company_number_match_insert'"
+    ).fetchone()[0] == 0
 
 
 def test_linked_fca_identity_cannot_be_mutated_or_rebound_by_direct_sql(tmp_path):
@@ -289,7 +404,7 @@ def test_linked_fca_identity_cannot_be_mutated_or_rebound_by_direct_sql(tmp_path
         "UPDATE fca_firms SET source_record_hash = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' WHERE id = ?",
         "UPDATE fca_firms SET lead_id = NULL WHERE id = ?",
     ):
-        with pytest.raises(sqlite3.IntegrityError, match="linked FCA identity"):
+        with pytest.raises(sqlite3.IntegrityError, match="linked FCA"):
             conn.execute(statement, (firm_id,))
 
 

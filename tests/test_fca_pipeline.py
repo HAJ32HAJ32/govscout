@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+import sqlite3
 
 import pytest
 
@@ -203,7 +204,10 @@ def test_fca_promotion_rejects_lead_link_created_during_verification(tmp_path):
             )
             return company
 
-    with pytest.raises(FcaEligibilityError, match="changed during verification"):
+    with pytest.raises(
+        (FcaEligibilityError, sqlite3.IntegrityError),
+        match="changed during verification|company numbers must match",
+    ):
         verify_and_promote_firm(
             conn,
             firm_id=firm_id,
@@ -252,3 +256,82 @@ def test_fca_promotion_binds_frn_and_source_url_across_company_verification(tmp_
         )
 
     assert conn.execute("SELECT count(*) FROM leads").fetchone()[0] == 0
+
+
+def test_fca_promotion_rejects_verified_company_number_mismatching_snapshot(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    other_company = CompaniesHouseClient(
+        StubCompaniesHouseTransport(
+            {
+                "company_number": "87654321",
+                "company_name": "Example Finance Ltd",
+                "company_status": "active",
+                "type": "ltd",
+            }
+        )
+    ).verify_company("87654321", now=datetime(2026, 7, 25, 11, tzinfo=UTC))
+
+    class WrongCompanyVerifier:
+        def verify_company(self, company_number, *, now):
+            return other_company
+
+    with pytest.raises(FcaEligibilityError, match="company number does not match"):
+        verify_and_promote_firm(
+            conn,
+            firm_id=firm_id,
+            companies_house=WrongCompanyVerifier(),
+            contact_email="compliance@example.test",
+            now=datetime(2026, 7, 25, 11, tzinfo=UTC),
+        )
+
+    assert conn.execute("SELECT count(*) FROM leads").fetchone()[0] == 0
+
+
+def test_database_rejects_mismatched_fca_lead_identity_and_later_lead_rekey(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    other_company = CompaniesHouseClient(
+        StubCompaniesHouseTransport(
+            {
+                "company_number": "87654321",
+                "company_name": "Other Finance Ltd",
+                "company_status": "active",
+                "type": "ltd",
+            }
+        )
+    ).verify_company("87654321", now=datetime(2026, 7, 25, 11, tzinfo=UTC))
+    other_lead = insert_verified_lead(
+        conn,
+        company=other_company,
+        contact_email="other@example.test",
+        source_register="Test register",
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="company number"):
+        conn.execute("UPDATE fca_firms SET lead_id = ? WHERE id = ?", (other_lead, firm_id))
+
+    matching_company = CompaniesHouseClient(
+        StubCompaniesHouseTransport(
+            {
+                "company_number": "12345678",
+                "company_name": "Example Finance Ltd",
+                "company_status": "active",
+                "type": "ltd",
+            }
+        )
+    ).verify_company("12345678", now=datetime(2026, 7, 25, 11, tzinfo=UTC))
+    matching_lead = insert_verified_lead(
+        conn,
+        company=matching_company,
+        contact_email="match@example.test",
+        source_register="Test register",
+    )
+    conn.execute("UPDATE fca_firms SET lead_id = ? WHERE id = ?", (matching_lead, firm_id))
+
+    with pytest.raises(sqlite3.IntegrityError, match="company number"):
+        conn.execute(
+            "UPDATE leads SET company_number = '99999999' WHERE id = ?", (matching_lead,)
+        )

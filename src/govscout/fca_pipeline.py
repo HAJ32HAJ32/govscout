@@ -48,6 +48,8 @@ def verify_and_promote_firm(
         raise FcaEligibilityError("FCA evidence has no Companies House company number")
 
     company = companies_house.verify_company(company_number, now=now)
+    if company.company_number != company_number:
+        raise FcaEligibilityError("Companies House company number does not match FCA snapshot")
     if _canonical_name(company.legal_name) != _canonical_name(firm["firm_name"]):
         raise FcaEligibilityError("Companies House legal name does not match FCA firm name")
     if conn.in_transaction:

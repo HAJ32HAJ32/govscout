@@ -3,10 +3,13 @@ import sqlite3
 
 import pytest
 
+from govscout.companies_house import CompaniesHouseClient
 from govscout.db import connect_database, migrate
 from govscout.enrichment import SiteFetchError, SitePage, run_enrichment
 from govscout.fca_discovery import ingest_fca_records, parse_fca_json
+from govscout.fca_pipeline import verify_and_promote_firm
 from govscout.quality import is_outreach_ready, review_firm, run_qc
+from tests.support import StubCompaniesHouseTransport
 
 
 NOW = datetime(2026, 7, 25, 10, tzinfo=UTC)
@@ -40,7 +43,27 @@ def _stage(conn, *, frn="123456", website="https://example.test/", observed=NOW)
     return conn.execute("SELECT id FROM fca_firms WHERE frn = ?", (frn,)).fetchone()[0]
 
 
+def _promote(conn, firm_id, *, verified_at=NOW):
+    return verify_and_promote_firm(
+        conn,
+        firm_id=firm_id,
+        companies_house=CompaniesHouseClient(
+            StubCompaniesHouseTransport(
+                {
+                    "company_number": "12345678",
+                    "company_name": "Example Finance Ltd",
+                    "company_status": "active",
+                    "type": "ltd",
+                }
+            )
+        ),
+        contact_email="compliance@example.test",
+        now=verified_at,
+    )
+
+
 def _approve_current_firm(conn, firm_id, *, now=NOW):
+    _promote(conn, firm_id, verified_at=now)
     transport = FakeSiteTransport(
         {
             "https://example.test/": "FCA regulated. AI-powered advice.",
@@ -129,6 +152,56 @@ def test_enrichment_records_honest_unknown_when_privacy_page_cannot_be_checked(t
     assert result.temperature == "COOL"
 
 
+def test_enrichment_rejects_fca_identity_changed_during_network_fetch(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+
+    class MutatingTransport(FakeSiteTransport):
+        def fetch_html(self, url):
+            if not self.urls:
+                conn.execute(
+                    "UPDATE fca_firms SET website_url = 'https://changed.test/' WHERE id = ?",
+                    (firm_id,),
+                )
+            return super().fetch_html(url)
+
+    transport = MutatingTransport(
+        {
+            "https://example.test/": "FCA regulated. AI-powered advice.",
+            "https://example.test/privacy": "Privacy and automated decisions.",
+            "https://example.test/careers": "Copilot.",
+            "https://example.test/ai-policy": "AI policy.",
+        }
+    )
+
+    with pytest.raises(SiteFetchError, match="IDENTITY_CHANGED"):
+        run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    assert conn.execute("SELECT count(*) FROM enrichment_runs").fetchone()[0] == 0
+
+
+def test_qc_rejects_complete_enrichment_for_unpromoted_firm(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    transport = FakeSiteTransport(
+        {
+            "https://example.test/": "FCA regulated. AI-powered advice.",
+            "https://example.test/privacy": "Privacy and automated decision safeguards.",
+            "https://example.test/careers": "We use Copilot.",
+            "https://example.test/ai-policy": "Our AI governance policy explains oversight.",
+        }
+    )
+    run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    qc = run_qc(conn, firm_id=firm_id, now=NOW)
+
+    assert not qc.passed
+    assert "LEAD_MISSING" in qc.reasons
+    assert not is_outreach_ready(conn, firm_id=firm_id, now=NOW)
+
+
 def test_qc_fails_closed_then_human_approval_makes_current_good_data_ready(tmp_path):
     conn = connect_database(tmp_path / "govscout.sqlite3")
     migrate(conn)
@@ -138,6 +211,8 @@ def test_qc_fails_closed_then_human_approval_makes_current_good_data_ready(tmp_p
     assert not missing.passed
     assert "SCAN_MISSING" in missing.reasons
     assert not is_outreach_ready(conn, firm_id=firm_id, now=NOW)
+
+    _promote(conn, firm_id)
 
     transport = FakeSiteTransport(
         {
@@ -283,7 +358,7 @@ def test_qc_rejects_stale_changed_duplicate_and_contradictory_evidence(tmp_path)
         )
 
 
-def test_approved_qc_is_revalidated_when_fca_status_changes(tmp_path):
+def test_approved_qc_is_revalidated_when_companies_house_receipt_becomes_stale(tmp_path):
     conn = connect_database(tmp_path / "govscout.sqlite3")
     migrate(conn)
     firm_id = _stage(conn)
@@ -291,8 +366,11 @@ def test_approved_qc_is_revalidated_when_fca_status_changes(tmp_path):
     assert is_outreach_ready(conn, firm_id=firm_id, now=NOW)
 
     conn.execute(
-        "UPDATE fca_firms SET is_active = 0, fca_status = 'Cancelled' WHERE id = ?",
-        (firm_id,),
+        """
+        UPDATE leads SET companies_house_verified_at = ?
+        WHERE id = (SELECT lead_id FROM fca_firms WHERE id = ?)
+        """,
+        ((NOW - timedelta(days=31)).isoformat(), firm_id),
     )
 
     assert not is_outreach_ready(conn, firm_id=firm_id, now=NOW)

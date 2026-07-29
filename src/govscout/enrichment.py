@@ -14,10 +14,17 @@ from urllib.error import HTTPError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import Request
 
+from govscout.fca_discovery import FcaDataError, canonicalize_website_url
+
 
 SITE_MAX_RESPONSE_BYTES = 512_000
 SITE_TIMEOUT_SECONDS = 15
 SITE_USER_AGENT = "GovScout/0.1 (+https://www.misegroup.co.uk/)"
+_FCA_IDENTITY_FIELDS = (
+    "frn", "firm_name", "fca_status", "firm_type", "is_active", "source_url",
+    "website_url", "source_location", "company_number", "lead_id", "source_record_hash",
+    "first_seen_at", "last_seen_at",
+)
 
 
 class SiteFetchError(ValueError):
@@ -137,6 +144,12 @@ class UrlSiteTransport:
         self._clock = now_provider or (lambda: datetime.now(UTC))
 
     def fetch_html(self, url: str) -> SitePage:
+        try:
+            canonical_url = canonicalize_website_url(url)
+        except FcaDataError as exc:
+            raise SiteFetchError("UNSAFE_URL") from exc
+        if canonical_url is None or canonical_url != url:
+            raise SiteFetchError("UNSAFE_URL")
         parsed = urlsplit(url)
         if not (
             parsed.scheme == "https"
@@ -251,6 +264,14 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _assert_firm_snapshot_current(
+    conn: sqlite3.Connection, *, firm_id: int, snapshot: sqlite3.Row
+) -> None:
+    current = conn.execute("SELECT * FROM fca_firms WHERE id = ?", (firm_id,)).fetchone()
+    if current is None or any(current[field] != snapshot[field] for field in _FCA_IDENTITY_FIELDS):
+        raise SiteFetchError("FCA_IDENTITY_CHANGED")
+
+
 def run_enrichment(
     conn: sqlite3.Connection,
     *,
@@ -262,7 +283,7 @@ def run_enrichment(
         raise ValueError("now must be timezone-aware")
     firm = conn.execute(
         """
-        SELECT source_url, website_url, fca_status, source_record_hash
+        SELECT *
         FROM fca_firms WHERE id = ?
         """,
         (firm_id,),
@@ -298,15 +319,23 @@ def run_enrichment(
     timestamp = now.astimezone(UTC).isoformat()
     if "home" not in pages:
         failure = failures.get("home", "FETCH_FAILED")
-        run_id = conn.execute(
-            """
-            INSERT INTO enrichment_runs (
-                firm_id, state, started_at, completed_at, website_url,
-                input_hash, failure_code
-            ) VALUES (?, 'failed', ?, ?, ?, ?, ?)
-            """,
-            (firm_id, timestamp, timestamp, website, firm["source_record_hash"], failure),
-        ).lastrowid
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _assert_firm_snapshot_current(conn, firm_id=firm_id, snapshot=firm)
+            conn.execute(
+                """
+                INSERT INTO enrichment_runs (
+                    firm_id, state, started_at, completed_at, website_url,
+                    input_hash, failure_code
+                ) VALUES (?, 'failed', ?, ?, ?, ?, ?)
+                """,
+                (firm_id, timestamp, timestamp, website, firm["source_record_hash"], failure),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
         raise SiteFetchError(failure)
 
     texts = {key: _plain_text(page.html) for key, page in pages.items()}
@@ -375,6 +404,7 @@ def run_enrichment(
     page_hash = _hash("\0".join(page.html for page in pages.values()))
     try:
         conn.execute("BEGIN IMMEDIATE")
+        _assert_firm_snapshot_current(conn, firm_id=firm_id, snapshot=firm)
         run_id = conn.execute(
             """
             INSERT INTO enrichment_runs (

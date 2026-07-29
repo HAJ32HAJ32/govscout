@@ -1,0 +1,42 @@
+[Unit]
+Description=GovScout public review surface (Gunicorn, loopback only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=govscout
+Group=govscout
+WorkingDirectory=/opt/govscout/current
+EnvironmentFile=/etc/govscout/govscout.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/govscout/current/.venv/bin/gunicorn govscout.wsgi:application_factory() --bind ${GOVSCOUT_BIND_HOST}:8766 --workers 2 --threads 1 --timeout 30 --access-logfile - --error-logfile -
+Restart=on-failure
+RestartSec=5
+UMask=0077
+StateDirectory=govscout
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/govscout
+
+[Install]
+WantedBy=multi-user.target

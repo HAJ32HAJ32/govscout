@@ -92,6 +92,27 @@ A hardened user-service template is provided at `deploy/govscout.service`. Befor
 
 Defaults and numbered SQL migrations are package resources, so installed wheels do not depend on a source checkout. Migrations run transactionally and applied versions are checksum-verified.
 
-## Live Gmail gate
+## Production browser access
 
+GovScout is intended to run once on the Mise VPS. H's PC is a browser client; it
+does not need Python, a repository clone, or a second SQLite database. The planned
+authenticated address is:
+
+```text
+https://leads.misegroup.co.uk
+```
+
+Public mode is deliberately separate from local/Tailscale development mode. It
+requires the exact public hostname, a loopback-only Gunicorn bind, a validated
+single-user password hash, a persistent session secret, HTTPS cookies, CSRF, and
+SQLite-backed login throttling. It refuses startup when any required setting is
+missing or invalid. Caddy terminates HTTPS and proxies to `127.0.0.1`; the Flask
+development server is not the production runtime.
+
+The versioned Caddy, systemd and environment templates, together with DNS,
+backup, migration, health-check and rollback instructions, live in
+`deploy/production/v1/RUNBOOK.md`. Never commit the populated production
+environment file or a plaintext login password.
+
+## Live Gmail gate
 Do not add credentials or perform a mailbox action during ordinary local development. OAuth setup and one harmless live-draft verification require separate, explicit approval. Production drafting remains locked until the complete GovScout lint policy exists and passes.

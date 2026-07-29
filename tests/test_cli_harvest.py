@@ -2,8 +2,9 @@ from datetime import UTC, datetime
 import json
 
 from govscout.cli import main
-from govscout.db import connect_database, migrate
+from govscout.db import connect_database, insert_verified_lead, migrate
 from govscout.enrichment import SitePage
+from tests.support import verified_company_from_test_profile
 
 
 def test_cli_ingests_bounded_fca_export_and_lists_firms_without_creating_leads(
@@ -91,6 +92,23 @@ def test_cli_runs_repeatable_enrichment_and_qc_for_one_fca_firm(tmp_path, capsys
     now = datetime(2026, 7, 25, 14, tzinfo=UTC)
     assert main(["ingest-fca", "--input", str(source)], conn=conn, now=now) == 0
     capsys.readouterr()
+    company = verified_company_from_test_profile(
+        {
+            "company_number": "12345678",
+            "company_name": "Example Finance Ltd",
+            "company_status": "active",
+            "type": "ltd",
+        },
+        now=now,
+    )
+    lead_id = insert_verified_lead(
+        conn,
+        company=company,
+        contact_email="director@example.test",
+        source_register="FCA Financial Services Register",
+        now=now,
+    )
+    conn.execute("UPDATE fca_firms SET lead_id = ? WHERE id = 1", (lead_id,))
 
     class SiteTransport:
         def fetch_html(self, url):

@@ -6,8 +6,11 @@ import hashlib
 import json
 import sqlite3
 
+from govscout.db import ALLOWED_LEGAL_FORMS
+
 
 FCA_MAX_AGE = timedelta(days=30)
+COMPANIES_HOUSE_MAX_AGE = timedelta(days=30)
 ENRICHMENT_MAX_AGE = timedelta(days=14)
 QC_VALIDITY = timedelta(days=7)
 
@@ -90,6 +93,12 @@ def _qc_input_hash(
     )
     payload = {
         "firm": {field: firm[field] for field in firm_fields},
+        "lead": (
+            dict(conn.execute("SELECT * FROM leads WHERE id = ?", (firm["lead_id"],)).fetchone())
+            if firm["lead_id"] is not None
+            and conn.execute("SELECT 1 FROM leads WHERE id = ?", (firm["lead_id"],)).fetchone()
+            else None
+        ),
         "duplicate_websites": _duplicate_snapshot(conn, firm),
         "enrichment": (
             {field: run[field] for field in run_fields} if run is not None else None
@@ -142,6 +151,33 @@ def _evaluate_current(
     elif _duplicate_snapshot(conn, firm):
         reasons.add("DUPLICATE_WEBSITE")
 
+    lead = None
+    if firm["lead_id"] is None:
+        reasons.add("LEAD_MISSING")
+    else:
+        lead = conn.execute("SELECT * FROM leads WHERE id = ?", (firm["lead_id"],)).fetchone()
+        if lead is None:
+            reasons.add("LEAD_MISSING")
+    if lead is not None:
+        if lead["company_number"] != firm["company_number"]:
+            reasons.add("COMPANIES_HOUSE_COMPANY_MISMATCH")
+        if lead["company_status"] != "active":
+            reasons.add("COMPANIES_HOUSE_NOT_ACTIVE")
+        if lead["legal_form"] not in ALLOWED_LEGAL_FORMS:
+            reasons.add("COMPANIES_HOUSE_LEGAL_FORM_INELIGIBLE")
+        if (
+            lead["verification_source"] != "companies_house_api"
+            or not lead["companies_house_profile_hash"]
+        ):
+            reasons.add("COMPANIES_HOUSE_VERIFICATION_INVALID")
+        try:
+            verified_at = _utc(lead["companies_house_verified_at"])
+        except (TypeError, ValueError):
+            reasons.add("COMPANIES_HOUSE_VERIFICATION_INVALID")
+        else:
+            if verified_at > current or current - verified_at > COMPANIES_HOUSE_MAX_AGE:
+                reasons.add("COMPANIES_HOUSE_VERIFICATION_STALE")
+
     if run is None:
         reasons.add("SCAN_MISSING")
     elif run["state"] != "complete":
@@ -151,6 +187,8 @@ def _evaluate_current(
             reasons.add("SCAN_STALE")
         if run["input_hash"] != firm["source_record_hash"]:
             reasons.add("SOURCE_CHANGED_SINCE_SCAN")
+        if run["website_url"] != firm["website_url"] or run["final_url"] != firm["website_url"]:
+            reasons.add("WEBSITE_CHANGED_SINCE_SCAN")
         groups = {item["signal_group"] for item in evidence}
         if not {"accountability", "ai_exposure", "governance_gap"} <= groups:
             reasons.add("EVIDENCE_MISSING")

@@ -1,0 +1,10 @@
+leads.misegroup.co.uk {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8766 {
+		header_up Host {host}
+	}
+	log {
+		output file /var/log/caddy/govscout-access.log
+		format json
+	}
+}

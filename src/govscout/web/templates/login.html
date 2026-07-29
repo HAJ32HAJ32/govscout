@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GovScout — Sign in</title>
+  <style nonce="{{ csp_nonce }}">
+    body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 10vh auto; padding: 1rem; color: #17202a; }
+    form { display: grid; gap: 1rem; }
+    label { display: grid; gap: .35rem; font-weight: 600; }
+    input, button { font: inherit; padding: .7rem; }
+    .error { color: #8b1a1a; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>GovScout</h1>
+    <p>Sign in to the private review surface.</p>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <form method="post" action="/login">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="{{ next_path }}">
+      <label>Username <input name="username" autocomplete="username" required></label>
+      <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>

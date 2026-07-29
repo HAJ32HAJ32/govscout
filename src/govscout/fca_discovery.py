@@ -71,21 +71,58 @@ def _validate_source_url(value: object, frn: str) -> str:
     return value
 
 
-def _validate_website(value: object) -> str | None:
-    website = _optional_text(value, "website_url")
-    if website is None:
+def canonicalize_website_url(value: object) -> str | None:
+    if value is None:
         return None
+    if type(value) is not str or not value or any(ord(char) <= 32 or ord(char) == 127 for char in value):
+        raise FcaDataError("website_url contains forbidden characters")
+    website = value
     parsed = urlsplit(website)
-    if not (
-        parsed.scheme == "https"
-        and parsed.hostname
-        and parsed.port in (None, 443)
-        and parsed.username is None
-        and parsed.password is None
-        and not parsed.fragment
-    ):
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise FcaDataError("website_url must be a plain HTTPS URL") from exc
+    if not (parsed.scheme.casefold() == "https" and parsed.hostname and port in (None, 443)):
         raise FcaDataError("website_url must be a plain HTTPS URL")
-    return website
+    if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+        raise FcaDataError("website_url must not contain credentials, query, or fragment")
+    if "\\" in parsed.path or "%" in parsed.path or any(ord(char) > 126 for char in parsed.path):
+        raise FcaDataError("website_url path is not canonicalizable")
+    try:
+        if parsed.hostname.endswith("."):
+            raise FcaDataError("website_url host must not have a trailing dot")
+        host = parsed.hostname.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise FcaDataError("website_url host is invalid") from exc
+    allowed_host_characters = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-.")
+    if (
+        not host
+        or len(host) > 253
+        or any(character not in allowed_host_characters for character in host)
+        or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            for label in host.split(".")
+        )
+    ):
+        raise FcaDataError("website_url host is invalid")
+    path = parsed.path or "/"
+    trailing_slash = path.endswith("/") or path.endswith("/.") or path.endswith("/..")
+    segments: list[str] = []
+    for segment in path.split("/"):
+        if not segment or segment == ".":
+            continue
+        if segment == "..":
+            if segments:
+                segments.pop()
+            continue
+        segments.append(segment)
+    canonical_path = "/" + "/".join(segments)
+    if trailing_slash and canonical_path != "/":
+        canonical_path += "/"
+    return f"https://{host}{canonical_path}"
 
 
 def _parse_record(raw: object) -> FcaFirmRecord:
@@ -108,7 +145,7 @@ def _parse_record(raw: object) -> FcaFirmRecord:
         fca_status=status,
         firm_type=_optional_text(raw.get("firm_type"), "firm_type"),
         source_url=_validate_source_url(raw.get("source_url"), frn_value),
-        website_url=_validate_website(raw.get("website_url")),
+        website_url=canonicalize_website_url(raw.get("website_url")),
         source_location=_optional_text(raw.get("location"), "location"),
         company_number=company_number,
         is_active=status in ACTIVE_FCA_STATUSES,
