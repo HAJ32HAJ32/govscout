@@ -15,12 +15,15 @@ from govscout.draft_service import (
     DraftPolicyRefused,
     DraftService,
 )
-from govscout.lca_harvest import (
-    LcaDirectoryFormatError,
-    LcaDirectoryTransport,
-    UrlLcaDirectoryTransport,
-    harvest_lca,
+from govscout.enrichment import SiteFetchError, SiteTransport, UrlSiteTransport, run_enrichment
+from govscout.fca_discovery import (
+    FCA_MAX_RESPONSE_BYTES,
+    FcaDataError,
+    ingest_fca_records,
+    parse_fca_json,
 )
+from govscout.quality import run_qc
+from govscout.retirement import create_verified_backup, retire_lca_candidates
 from govscout.sendguard import (
     GuardDecision,
     ReservationConflict,
@@ -64,14 +67,27 @@ def build_parser() -> argparse.ArgumentParser:
     web = subparsers.add_parser("web", help="run the locked private review interface")
     web.add_argument("--host", default="127.0.0.1")
     web.add_argument("--port", type=int, default=5000)
-    harvest_lca_parser = subparsers.add_parser(
-        "harvest-lca", help="stage a bounded sample from the official LCA directory"
+    ingest_fca = subparsers.add_parser(
+        "ingest-fca", help="stage a bounded FCA Register export"
     )
-    harvest_lca_parser.add_argument("--limit", type=int, default=25)
-    candidates = subparsers.add_parser(
-        "candidates", help="list staged candidates awaiting verification"
+    ingest_fca.add_argument("--input", required=True, type=Path)
+    ingest_fca.add_argument("--limit", type=int, default=25)
+    fca_firms = subparsers.add_parser(
+        "fca-firms", help="list FCA firms and latest score"
     )
-    candidates.add_argument("--limit", type=int, default=25)
+    fca_firms.add_argument("--limit", type=int, default=25)
+    enrich_fca = subparsers.add_parser(
+        "enrich-fca", help="scan one FCA firm's public website"
+    )
+    enrich_fca.add_argument("firm_id", type=int)
+    qc_fca = subparsers.add_parser(
+        "qc-fca", help="run fail-closed quality checks for one FCA firm"
+    )
+    qc_fca.add_argument("firm_id", type=int)
+    retire_lca = subparsers.add_parser(
+        "retire-lca", help="retire legacy LCA candidates after a verified backup"
+    )
+    retire_lca.add_argument("--backup", required=True, type=Path)
     return parser
 
 
@@ -131,7 +147,7 @@ def main(
     now: datetime | None = None,
     draft_service: DraftService | None = None,
     candidate_source: CandidateSource | None = None,
-    lca_transport: LcaDirectoryTransport | None = None,
+    site_transport: SiteTransport | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "web":
@@ -150,55 +166,114 @@ def main(
         return 0
     current_time = now or datetime.now(UTC)
 
-    if args.command == "harvest-lca":
+    if args.command == "retire-lca":
         if conn is None:
             conn = connect_database(_default_database_path())
             migrate(conn)
-        transport = lca_transport or UrlLcaDirectoryTransport()
         try:
-            result = harvest_lca(
+            receipt = create_verified_backup(conn, args.backup)
+            result = retire_lca_candidates(
                 conn,
-                transport,
-                limit=args.limit,
+                backup_receipt=receipt,
                 now=current_time,
             )
-        except (LcaDirectoryFormatError, OSError, ValueError) as exc:
-            print(f"LCA harvest failed: {exc}")
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            print(f"LCA retirement failed: {exc}")
             return 2
-        refreshed = result.staged_count - result.created_count
         print(
-            f"LCA directory: {result.source_count} members; "
-            f"staged {result.staged_count} "
-            f"({result.created_count} new, {refreshed} refreshed)"
+            f"Retired {result.retired_count} LCA candidates; "
+            f"verified backup: {receipt.backup_path} ({receipt.backup_sha256})"
         )
         return 0
 
-    if args.command == "candidates":
+    if args.command == "ingest-fca":
         if conn is None:
             conn = connect_database(_default_database_path())
             migrate(conn)
-        if not 1 <= args.limit <= 50:
-            print("Candidate list limit must be between 1 and 50")
+        try:
+            with args.input.open("rb") as source_file:
+                payload = source_file.read(FCA_MAX_RESPONSE_BYTES + 1)
+            records = parse_fca_json(payload)
+            result = ingest_fca_records(
+                conn, records, limit=args.limit, now=current_time
+            )
+        except (FcaDataError, OSError, ValueError) as exc:
+            print(f"FCA ingestion failed: {exc}")
+            return 2
+        unchanged = result.staged_count - result.created_count - result.changed_count
+        print(
+            f"FCA source: {result.source_count} firms; staged {result.staged_count} "
+            f"({result.created_count} new, {result.changed_count} changed, "
+            f"{unchanged} unchanged)"
+        )
+        return 0
+
+    if args.command == "fca-firms":
+        if conn is None:
+            conn = connect_database(_default_database_path())
+            migrate(conn)
+        if not 1 <= args.limit <= 100:
+            print("FCA firm list limit must be between 1 and 100")
             return 2
         rows = conn.execute(
             """
-            SELECT id, status, company_name, source_location, source_url
-            FROM candidates
-            ORDER BY id
-            LIMIT ?
+            SELECT f.frn, f.fca_status, f.firm_name, f.source_location,
+                e.score, e.temperature
+            FROM fca_firms f
+            LEFT JOIN enrichment_runs e ON e.id = (
+                SELECT id FROM enrichment_runs
+                WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
+            )
+            ORDER BY f.frn LIMIT ?
             """,
             (args.limit,),
         ).fetchall()
         if not rows:
-            print("No staged candidates")
+            print("No FCA firms")
             return 0
         for row in rows:
             location = row["source_location"] or "Location not listed"
+            score = (
+                f"{row['score']} {row['temperature']}"
+                if row["score"] is not None
+                else "unscored"
+            )
             print(
-                f"{row['id']} | {row['status']} | {row['company_name']} | "
-                f"{location}\n  {row['source_url']}"
+                f"{row['frn']} | {row['fca_status']} | {row['firm_name']} | "
+                f"{location} | {score}"
             )
         return 0
+
+    if args.command in {"enrich-fca", "qc-fca"}:
+        if conn is None:
+            conn = connect_database(_default_database_path())
+            migrate(conn)
+        if args.command == "enrich-fca":
+            try:
+                result = run_enrichment(
+                    conn,
+                    firm_id=args.firm_id,
+                    transport=site_transport or UrlSiteTransport(),
+                    now=current_time,
+                )
+            except (KeyError, SiteFetchError, ValueError) as exc:
+                print(f"FCA enrichment failed: {exc}")
+                return 2
+            print(
+                f"FCA enrichment complete: run {result.run_id}; "
+                f"{result.score} {result.temperature}"
+            )
+            return 0
+        try:
+            result = run_qc(conn, firm_id=args.firm_id, now=current_time)
+        except (KeyError, ValueError) as exc:
+            print(f"FCA QC failed to run: {exc}")
+            return 2
+        if result.passed:
+            print(f"QC pass: run {result.qc_run_id}")
+            return 0
+        print(f"QC fail: run {result.qc_run_id}; {', '.join(result.reasons)}")
+        return 2
 
     if conn is None or guard is None:
         conn, guard = _default_dependencies()

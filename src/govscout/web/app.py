@@ -6,7 +6,7 @@ import secrets
 import sqlite3
 from typing import Protocol
 
-from flask import Flask, abort, jsonify, render_template, request, session
+from flask import Flask, abort, jsonify, redirect, render_template, request, session, url_for
 
 from govscout.cli import format_counter
 from govscout.draft_service import (
@@ -15,6 +15,7 @@ from govscout.draft_service import (
     DraftPolicyRefused,
     DraftService,
 )
+from govscout.quality import review_firm
 from govscout.sendguard import (
     ReservationConflict,
     ReservationRequest,
@@ -76,14 +77,50 @@ def create_app(
         conn = conn_factory()
         try:
             decision = guard.status(conn, now=clock())
-            staged_candidates = conn.execute(
+            firm_rows = conn.execute(
                 """
-                SELECT id, status, company_name, source_location, source_url
-                FROM candidates
-                ORDER BY id
+                SELECT f.*,
+                    e.id AS enrichment_run_id, e.state AS enrichment_state,
+                    e.score, e.temperature, e.completed_at AS enriched_at,
+                    q.id AS qc_run_id, q.state AS qc_state,
+                    q.reason_codes AS qc_reasons, q.expires_at AS qc_expires_at,
+                    r.decision AS review_decision, r.notes AS review_notes,
+                    r.rejection_reason
+                FROM fca_firms f
+                LEFT JOIN enrichment_runs e ON e.id = (
+                    SELECT id FROM enrichment_runs
+                    WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
+                )
+                LEFT JOIN qc_runs q ON q.id = (
+                    SELECT id FROM qc_runs
+                    WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
+                )
+                LEFT JOIN firm_reviews r ON r.id = (
+                    SELECT id FROM firm_reviews
+                    WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
+                )
+                ORDER BY COALESCE(e.score, -1) DESC, f.id
                 LIMIT 50
                 """
             ).fetchall()
+            fca_firms = []
+            for row in firm_rows:
+                item = dict(row)
+                if row["enrichment_run_id"] is None:
+                    item["evidence"] = []
+                else:
+                    item["evidence"] = [
+                        dict(evidence)
+                        for evidence in conn.execute(
+                            """
+                            SELECT signal_group, code, evidence_state, source_url, excerpt
+                            FROM evidence_items
+                            WHERE run_id = ? ORDER BY signal_group, code
+                            """,
+                            (row["enrichment_run_id"],),
+                        ).fetchall()
+                    ]
+                fca_firms.append(item)
         finally:
             conn.close()
         due_candidates = []
@@ -99,8 +136,33 @@ def create_app(
             drafting_locked=drafting_locked,
             csrf_token=session["csrf_token"],
             due_candidates=due_candidates,
-            staged_candidates=staged_candidates,
+            fca_firms=fca_firms,
         )
+
+    @app.post("/today/review/<int:firm_id>")
+    def review_one(firm_id: int):
+        decision_value = request.form.get("decision", "")
+        raw_qc_run_id = request.form.get("qc_run_id")
+        try:
+            qc_run_id = int(raw_qc_run_id) if raw_qc_run_id else None
+        except ValueError:
+            return jsonify(error="invalid_qc_run"), 422
+        conn = conn_factory()
+        try:
+            review_firm(
+                conn,
+                firm_id=firm_id,
+                decision=decision_value,
+                qc_run_id=qc_run_id,
+                notes=request.form.get("notes"),
+                rejection_reason=request.form.get("rejection_reason"),
+                now=clock(),
+            )
+        except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
+            return jsonify(error="review_refused", detail=str(exc)), 422
+        finally:
+            conn.close()
+        return redirect(url_for("today"), code=303)
 
     @app.post("/today/draft/<int:lead_id>")
     def draft_one(lead_id: int):
