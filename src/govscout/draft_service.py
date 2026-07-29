@@ -6,6 +6,7 @@ import sqlite3
 from typing import Mapping, Protocol
 
 from govscout.policy import DraftPolicy
+from govscout.quality import is_outreach_ready
 from govscout.sendguard import GuardDecision, ReservationRequest, SendGuard
 
 
@@ -137,7 +138,18 @@ class DraftService:
         if not policy_result.passed:
             raise DraftPolicyRefused(policy_result.reasons)
 
-        reservation = self.guard.reserve(conn, request, now=now)
+        def validate_fca_readiness(transaction: sqlite3.Connection) -> None:
+            fca_firm = transaction.execute(
+                "SELECT id FROM fca_firms WHERE lead_id = ?", (request.lead_id,)
+            ).fetchone()
+            if fca_firm is not None and not is_outreach_ready(
+                transaction, firm_id=fca_firm["id"], now=now
+            ):
+                raise DraftPolicyRefused(("FCA_QC_APPROVAL_REQUIRED",))
+
+        reservation = self.guard.reserve(
+            conn, request, now=now, validator=validate_fca_readiness
+        )
         if not reservation.created:
             return self._resume_existing(
                 conn,

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import secrets
 import sqlite3
 from typing import Protocol
 
-from flask import Flask, abort, jsonify, render_template, request, session
+from flask import Flask, abort, g, jsonify, redirect, render_template, request, session, url_for
 
+from govscout.auth import AuthConfig, LoginThrottle, verify_password
 from govscout.cli import format_counter
 from govscout.draft_service import (
     DraftAlreadySent,
@@ -15,6 +16,7 @@ from govscout.draft_service import (
     DraftPolicyRefused,
     DraftService,
 )
+from govscout.quality import review_firm
 from govscout.sendguard import (
     ReservationConflict,
     ReservationRequest,
@@ -39,28 +41,61 @@ def create_app(
     candidate_source: CandidateSource | None = None,
     csrf_secret: bytes | str | None = None,
     trusted_hosts: tuple[str, ...] = (),
+    auth: AuthConfig | None = None,
 ) -> Flask:
     app = Flask(__name__)
-    app.secret_key = csrf_secret or secrets.token_bytes(32)
+    app.secret_key = auth.session_secret if auth else (csrf_secret or secrets.token_bytes(32))
     app.config.update(
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Strict",
+        SESSION_COOKIE_SECURE=auth is not None,
+        SESSION_COOKIE_NAME="govscout_session",
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
+        MAX_CONTENT_LENGTH=16_384,
     )
     clock = now_provider or (lambda: datetime.now(UTC))
     drafting_locked = draft_service is None or candidate_source is None
-    allowed_hosts = {
-        "localhost",
-        "127.0.0.1",
-        "::1",
-        *(canonical_safe_bind_host(host) for host in trusted_hosts),
-    }
+    if auth is None:
+        allowed_hosts = {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            *(canonical_safe_bind_host(host) for host in trusted_hosts),
+        }
+    else:
+        allowed_hosts = {auth.public_host}
+    throttle = LoginThrottle(max_failures=auth.max_failures) if auth else None
+
+    def safe_next(value: str | None) -> str:
+        if value and value.startswith("/") and not value.startswith("//") and "\\" not in value:
+            return value
+        return url_for("today")
 
     @app.before_request
-    def protect_state_changes():
+    def protect_request():
+        g.csp_nonce = secrets.token_urlsafe(24)
+        raw_content_length = request.environ.get("CONTENT_LENGTH")
+        if raw_content_length not in (None, ""):
+            if (
+                not isinstance(raw_content_length, str)
+                or not raw_content_length.isascii()
+                or not raw_content_length.isdecimal()
+            ):
+                abort(413)
+            declared_content_length = int(raw_content_length)
+            if declared_content_length > app.config["MAX_CONTENT_LENGTH"]:
+                abort(413)
         host_header = request.environ.get("HTTP_HOST", "")
         hostname = parse_host_header(host_header)
         if hostname not in allowed_hosts:
             abort(400)
+
+        auth_exempt = request.endpoint in {"login", "static"}
+        if auth is not None and not auth_exempt and session.get("authenticated") is not True:
+            if request.method in {"GET", "HEAD"}:
+                return redirect(url_for("login", next=request.path))
+            abort(401)
+
         if "csrf_token" not in session:
             session["csrf_token"] = secrets.token_urlsafe(32)
         if request.method in {"GET", "HEAD", "OPTIONS"}:
@@ -71,19 +106,143 @@ def create_app(
             abort(403)
         return None
 
+    @app.after_request
+    def security_headers(response):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; base-uri 'none'; form-action 'self'; "
+            f"frame-ancestors 'none'; object-src 'none'; style-src 'nonce-{g.csp_nonce}'"
+        )
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Cache-Control"] = "no-store"
+        if auth is not None and auth.public_https:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        return response
+
+    @app.context_processor
+    def inject_csp_nonce():
+        return {"csp_nonce": g.csp_nonce}
+
+    @app.route("/login", methods=["GET", "POST"])
+    def login():
+        if auth is None:
+            abort(404)
+        if request.method == "GET":
+            if session.get("authenticated") is True:
+                return redirect(safe_next(request.args.get("next")))
+            return render_template(
+                "login.html",
+                csrf_token=session["csrf_token"],
+                next_path=safe_next(request.args.get("next")),
+                error=None,
+            )
+
+        conn = conn_factory()
+        try:
+            assert throttle is not None
+            admission = throttle.reserve_attempt(conn, now=clock())
+            if not admission.admitted:
+                return render_template(
+                    "login.html",
+                    csrf_token=session["csrf_token"],
+                    next_path=safe_next(request.form.get("next")),
+                    error="Too many attempts. Try again later.",
+                ), 429
+            assert admission.token is not None
+            supplied_username = request.form.get("username", "")
+            supplied_password = request.form.get("password", "")
+            valid_username = secrets.compare_digest(supplied_username, auth.username)
+            valid_password = verify_password(supplied_password, auth.password_hash)
+            if not (valid_username and valid_password):
+                blocked_after = throttle.finalize_failure(
+                    conn,
+                    token=admission.token,
+                    now=clock(),
+                )
+                status = 429 if blocked_after else 401
+                error = (
+                    "Too many attempts. Try again later."
+                    if blocked_after
+                    else "Invalid credentials."
+                )
+                return render_template(
+                    "login.html",
+                    csrf_token=session["csrf_token"],
+                    next_path=safe_next(request.form.get("next")),
+                    error=error,
+                ), status
+            throttle.finalize_success(conn, token=admission.token)
+        finally:
+            conn.close()
+        destination = safe_next(request.form.get("next"))
+        session.clear()
+        session.permanent = True
+        session["authenticated"] = True
+        session["csrf_token"] = secrets.token_urlsafe(32)
+        return redirect(destination, code=303)
+
+    @app.post("/logout")
+    def logout():
+        session.clear()
+        response = redirect(url_for("login"), code=303)
+        response.delete_cookie(
+            app.config["SESSION_COOKIE_NAME"],
+            secure=bool(auth),
+            httponly=True,
+            samesite="Strict",
+        )
+        return response
+
     @app.get("/today")
     def today():
         conn = conn_factory()
         try:
             decision = guard.status(conn, now=clock())
-            staged_candidates = conn.execute(
+            firm_rows = conn.execute(
                 """
-                SELECT id, status, company_name, source_location, source_url
-                FROM candidates
-                ORDER BY id
+                SELECT f.*,
+                    e.id AS enrichment_run_id, e.state AS enrichment_state,
+                    e.score, e.temperature, e.completed_at AS enriched_at,
+                    q.id AS qc_run_id, q.state AS qc_state,
+                    q.reason_codes AS qc_reasons, q.expires_at AS qc_expires_at,
+                    r.decision AS review_decision, r.notes AS review_notes,
+                    r.rejection_reason
+                FROM fca_firms f
+                LEFT JOIN enrichment_runs e ON e.id = (
+                    SELECT id FROM enrichment_runs
+                    WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
+                )
+                LEFT JOIN qc_runs q ON q.id = (
+                    SELECT id FROM qc_runs
+                    WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
+                )
+                LEFT JOIN firm_reviews r ON r.id = (
+                    SELECT id FROM firm_reviews
+                    WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
+                )
+                ORDER BY COALESCE(e.score, -1) DESC, f.id
                 LIMIT 50
                 """
             ).fetchall()
+            fca_firms = []
+            for row in firm_rows:
+                item = dict(row)
+                if row["enrichment_run_id"] is None:
+                    item["evidence"] = []
+                else:
+                    item["evidence"] = [
+                        dict(evidence)
+                        for evidence in conn.execute(
+                            """
+                            SELECT signal_group, code, evidence_state, source_url, excerpt
+                            FROM evidence_items
+                            WHERE run_id = ? ORDER BY signal_group, code
+                            """,
+                            (row["enrichment_run_id"],),
+                        ).fetchall()
+                    ]
+                fca_firms.append(item)
         finally:
             conn.close()
         due_candidates = []
@@ -99,8 +258,34 @@ def create_app(
             drafting_locked=drafting_locked,
             csrf_token=session["csrf_token"],
             due_candidates=due_candidates,
-            staged_candidates=staged_candidates,
+            fca_firms=fca_firms,
+            auth_enabled=auth is not None,
         )
+
+    @app.post("/today/review/<int:firm_id>")
+    def review_one(firm_id: int):
+        decision_value = request.form.get("decision", "")
+        raw_qc_run_id = request.form.get("qc_run_id")
+        try:
+            qc_run_id = int(raw_qc_run_id) if raw_qc_run_id else None
+        except ValueError:
+            return jsonify(error="invalid_qc_run"), 422
+        conn = conn_factory()
+        try:
+            review_firm(
+                conn,
+                firm_id=firm_id,
+                decision=decision_value,
+                qc_run_id=qc_run_id,
+                notes=request.form.get("notes"),
+                rejection_reason=request.form.get("rejection_reason"),
+                now=clock(),
+            )
+        except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
+            return jsonify(error="review_refused", detail=str(exc)), 422
+        finally:
+            conn.close()
+        return redirect(url_for("today"), code=303)
 
     @app.post("/today/draft/<int:lead_id>")
     def draft_one(lead_id: int):

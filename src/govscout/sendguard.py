@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
 import hashlib
 import sqlite3
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 from govscout.config import Settings
@@ -234,6 +235,7 @@ class SendGuard:
         request: ReservationRequest,
         *,
         now: datetime,
+        validator: Callable[[sqlite3.Connection], None] | None = None,
     ) -> Reservation:
         self._require_aware(now)
         try:
@@ -244,6 +246,8 @@ class SendGuard:
             ) from exc
         try:
             conn.execute("BEGIN IMMEDIATE")
+            if validator is not None:
+                validator(conn)
             lead = conn.execute(
                 "SELECT contact_email FROM leads WHERE id = ?",
                 (request.lead_id,),

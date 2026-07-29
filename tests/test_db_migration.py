@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+import hashlib
 import os
 import sqlite3
 
@@ -7,6 +8,8 @@ import pytest
 from govscout.companies_house import VerifiedCompany
 from govscout.db import (
     ALLOWED_LEGAL_FORMS,
+    _migration_texts,
+    _statements,
     connect_database,
     insert_verified_lead,
     migrate,
@@ -35,6 +38,33 @@ def _lead(conn, number="12345678"):
         contact_email=f"director-{number}@example.test",
         source_register="LCA member directory",
     )
+
+
+def _migrate_through_007(conn):
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        """
+        CREATE TABLE schema_migrations (
+            version TEXT PRIMARY KEY,
+            checksum TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )
+        """
+    )
+    for version, _name, sql in _migration_texts():
+        if version == "008":
+            break
+        for statement in _statements(sql):
+            conn.execute(statement)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?)",
+            (
+                version,
+                hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+                "2026-07-29T09:00:00+00:00",
+            ),
+        )
+    conn.execute("COMMIT")
 
 
 def _insert_send_in_state(conn, lead_id, state):
@@ -114,6 +144,13 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         "schema_migrations",
         "app_state",
         "candidates",
+        "fca_firms",
+        "fca_observations",
+        "enrichment_runs",
+        "evidence_items",
+        "qc_runs",
+        "firm_reviews",
+        "retirement_events",
         "leads",
         "sends",
     }.issubset(tables)
@@ -126,7 +163,356 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         ("003", 64),
         ("004", 64),
         ("005", 64),
+        ("006", 64),
+        ("007", 64),
+        ("008", 64),
     ]
+
+
+def test_fca_schema_fails_closed_on_invalid_identity_and_unevidenced_signal(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO fca_firms (
+                frn, firm_name, fca_status, is_active, source_url,
+                source_record_hash, first_seen_at, last_seen_at
+            ) VALUES ('not-an-frn', 'Example', 'Authorised', 1, ?, ?, ?, ?)
+            """,
+            (
+                "https://register.fca.org.uk/s/firm?id=001",
+                "a" * 64,
+                "2026-07-25T10:00:00+00:00",
+                "2026-07-25T10:00:00+00:00",
+            ),
+        )
+
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example Finance Ltd', 'Authorised', 1, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            "a" * 64,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:00:00+00:00",
+        ),
+    ).lastrowid
+    run_id = conn.execute(
+        """
+        INSERT INTO enrichment_runs (
+            firm_id, state, started_at, completed_at, input_hash, score, temperature
+        ) VALUES (?, 'complete', ?, ?, ?, 0, 'COOL')
+        """,
+        (
+            firm_id,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:01:00+00:00",
+            "c" * 64,
+        ),
+    ).lastrowid
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO evidence_items (
+                run_id, signal_group, code, evidence_state, weight,
+                source_url, excerpt, observed_at, content_hash
+            ) VALUES (?, 'ai_exposure', 'AI_CLAIM', 'present', 20, NULL, NULL, ?, ?)
+            """,
+            (run_id, "2026-07-25T10:00:00+00:00", "b" * 64),
+        )
+
+
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "https://register.fca.org.uk/s/firm?id=654321",
+        "https://register.fca.org.uk/s/firm?id=123456&extra=1",
+        "https://register.fca.org.uk/s/firm/123456",
+    ],
+)
+def test_fca_source_url_must_exactly_match_its_frn(tmp_path, source_url):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO fca_firms (
+                frn, firm_name, fca_status, is_active, source_url,
+                source_record_hash, first_seen_at, last_seen_at
+            ) VALUES ('123456', 'Example', 'Authorised', 1, ?, ?, ?, ?)
+            """,
+            (
+                source_url,
+                "a" * 64,
+                "2026-07-25T10:00:00+00:00",
+                "2026-07-25T10:00:00+00:00",
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "website_url",
+    [
+        "https://",
+        "https://user@example.com/",
+        "https://example.com/#fragment",
+        "https://example.com/ bad",
+        "https://example.com/\nadmin",
+        "https:///missing-host",
+        "https://example.com:443/",
+        "https://example.com:8443/",
+        "https://-bad.example/",
+        "https://bad-.example/",
+        "https://bad..example/",
+        "https://.bad.example/",
+        "https://bad.example./",
+    ],
+)
+def test_fca_website_url_rejects_ambiguous_or_unsafe_direct_sql(tmp_path, website_url):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO fca_firms (
+                frn, firm_name, fca_status, is_active, source_url, website_url,
+                source_record_hash, first_seen_at, last_seen_at
+            ) VALUES ('123456', 'Example', 'Authorised', 1, ?, ?, ?, ?, ?)
+            """,
+            (
+                "https://register.fca.org.uk/s/firm?id=123456",
+                website_url,
+                "a" * 64,
+                "2026-07-25T10:00:00+00:00",
+                "2026-07-25T10:00:00+00:00",
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "legacy_website",
+    [
+        "https://EXAMPLE.com/",
+        "https://-bad.example/",
+        "https://bad-.example/",
+        "https://bad..example/",
+        "https://.bad.example/",
+        "https://bad.example./",
+        "https://bad_host.example/",
+        "https://bad~host.example/",
+        f"https://{'a' * 64}.example/",
+        f"https://{'.'.join(['a' * 63] * 4)}/",
+    ],
+)
+def test_migration_008_refuses_legacy_noncanonical_website_and_rolls_back(
+    tmp_path, legacy_website
+):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    _migrate_through_007(conn)
+    conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url, website_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example', 'Authorised', 1, ?, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            legacy_website,
+            "a" * 64,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:00:00+00:00",
+        ),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        migrate(conn)
+
+    assert conn.execute(
+        "SELECT count(*) FROM schema_migrations WHERE version = '008'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'fca_website_canonical_insert'"
+    ).fetchone()[0] == 0
+
+
+def test_migration_008_refuses_legacy_linked_company_mismatch_and_rolls_back(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    _migrate_through_007(conn)
+    lead_id = _lead(conn, "12345678")
+    conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url, company_number,
+            lead_id, source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example', 'Authorised', 1, ?, '87654321', ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            lead_id,
+            "a" * 64,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:00:00+00:00",
+        ),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        migrate(conn)
+
+    assert conn.execute(
+        "SELECT count(*) FROM schema_migrations WHERE version = '008'"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'fca_lead_company_number_match_insert'"
+    ).fetchone()[0] == 0
+
+
+def test_linked_fca_identity_cannot_be_mutated_or_rebound_by_direct_sql(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    lead_id = _lead(conn)
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url, company_number,
+            lead_id, source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example 12345678 Ltd', 'Authorised', 1, ?,
+                  '12345678', ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            lead_id,
+            "a" * 64,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:00:00+00:00",
+        ),
+    ).lastrowid
+
+    for statement in (
+        "UPDATE fca_firms SET firm_name = 'Changed Ltd' WHERE id = ?",
+        "UPDATE fca_firms SET is_active = 0 WHERE id = ?",
+        "UPDATE fca_firms SET company_number = '87654321' WHERE id = ?",
+        "UPDATE fca_firms SET source_record_hash = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' WHERE id = ?",
+        "UPDATE fca_firms SET lead_id = NULL WHERE id = ?",
+    ):
+        with pytest.raises(sqlite3.IntegrityError, match="linked FCA"):
+            conn.execute(statement, (firm_id,))
+
+
+def test_enrichment_runs_and_retirement_audit_are_immutable_by_direct_sql(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example', 'Authorised', 1, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            "a" * 64,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:00:00+00:00",
+        ),
+    ).lastrowid
+    run_id = conn.execute(
+        """
+        INSERT INTO enrichment_runs (
+            firm_id, state, started_at, completed_at, input_hash, score, temperature
+        ) VALUES (?, 'complete', ?, ?, ?, 40, 'COOL')
+        """,
+        (
+            firm_id,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:01:00+00:00",
+            "a" * 64,
+        ),
+    ).lastrowid
+    event_id = conn.execute(
+        """
+        INSERT INTO retirement_events (
+            source_register, retired_count, leads_before, sends_before,
+            backup_path, backup_sha256, retired_at, note
+        ) VALUES ('LCA member directory', 0, 0, 0, '/tmp/backup.sqlite3', ?, ?, 'audit')
+        """,
+        ("b" * 64, "2026-07-25T10:00:00+00:00"),
+    ).lastrowid
+
+    for table, row_id in (("enrichment_runs", run_id), ("retirement_events", event_id)):
+        with pytest.raises(sqlite3.IntegrityError, match="immutable|cannot be deleted"):
+            conn.execute(f"UPDATE {table} SET id = id WHERE id = ?", (row_id,))
+        with pytest.raises(sqlite3.IntegrityError, match="immutable|cannot be deleted"):
+            conn.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+
+
+@pytest.mark.parametrize("terminal_state", ["complete", "failed"])
+def test_evidence_cannot_be_appended_to_terminal_enrichment_run(tmp_path, terminal_state):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example', 'Authorised', 1, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            "a" * 64,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:00:00+00:00",
+        ),
+    ).lastrowid
+    if terminal_state == "complete":
+        run_id = conn.execute(
+            """
+            INSERT INTO enrichment_runs (
+                firm_id, state, started_at, completed_at, input_hash, score, temperature
+            ) VALUES (?, 'complete', ?, ?, ?, 40, 'COOL')
+            """,
+            (
+                firm_id,
+                "2026-07-25T10:00:00+00:00",
+                "2026-07-25T10:01:00+00:00",
+                "b" * 64,
+            ),
+        ).lastrowid
+    else:
+        run_id = conn.execute(
+            """
+            INSERT INTO enrichment_runs (
+                firm_id, state, started_at, completed_at, input_hash, failure_code
+            ) VALUES (?, 'failed', ?, ?, ?, 'FETCH_FAILED')
+            """,
+            (
+                firm_id,
+                "2026-07-25T10:00:00+00:00",
+                "2026-07-25T10:01:00+00:00",
+                "b" * 64,
+            ),
+        ).lastrowid
+
+    with pytest.raises(sqlite3.IntegrityError, match="terminal enrichment run"):
+        conn.execute(
+            """
+            INSERT INTO evidence_items (
+                run_id, signal_group, code, evidence_state, weight,
+                source_url, excerpt, observed_at, content_hash
+            ) VALUES (?, 'ai_exposure', 'AI_VISIBLE', 'absent', 0,
+                      'https://example.test/', NULL, ?, ?)
+            """,
+            (run_id, "2026-07-25T10:00:00+00:00", "c" * 64),
+        )
 
 
 def test_unverified_directory_candidate_is_staged_without_becoming_a_lead(tmp_path):

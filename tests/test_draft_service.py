@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,7 +11,10 @@ from govscout.draft_service import (
     DraftPolicyRefused,
     DraftService,
 )
+from govscout.enrichment import SitePage, run_enrichment
+from govscout.fca_discovery import ingest_fca_records, parse_fca_json
 from govscout.policy import LintNotReadyPolicy, PolicyResult
+from govscout.quality import review_firm, run_qc
 from govscout.sendguard import ReservationRequest, SendGuard
 from tests.support import (
     verified_company_from_test_profile as verified_company_from_profile,
@@ -90,6 +93,53 @@ def _setup(tmp_path):
     return conn, request
 
 
+def _link_fca_firm(conn, lead_id):
+    records = parse_fca_json(
+        b'{"firms":[{"frn":"123456","firm_name":"Example Governance Ltd",'
+        b'"status":"Authorised","firm_type":"Regulated firm",'
+        b'"source_url":"https://register.fca.org.uk/s/firm?id=123456",'
+        b'"website_url":"https://example.test/","location":"London",'
+        b'"company_number":"12345678"}]}'
+    )
+    ingest_fca_records(
+        conn,
+        records,
+        limit=1,
+        now=datetime(2026, 7, 21, 8, tzinfo=UTC),
+    )
+    conn.execute("UPDATE fca_firms SET lead_id = ? WHERE frn = '123456'", (lead_id,))
+
+
+def _approve_fca_firm(conn, lead_id, *, now):
+    _link_fca_firm(conn, lead_id)
+    firm_id = conn.execute(
+        "SELECT id FROM fca_firms WHERE lead_id = ?", (lead_id,)
+    ).fetchone()[0]
+
+    class PassingTransport:
+        def fetch_html(self, url):
+            return SitePage(
+                url=url,
+                final_url=url,
+                html="FCA regulated. AI-powered. Privacy automated decision safeguards.",
+                fetched_at=now,
+            )
+
+    run_enrichment(conn, firm_id=firm_id, transport=PassingTransport(), now=now)
+    qc = run_qc(conn, firm_id=firm_id, now=now)
+    assert qc.passed
+    review_firm(
+        conn,
+        firm_id=firm_id,
+        decision="approved",
+        qc_run_id=qc.qc_run_id,
+        notes="Checked",
+        rejection_reason=None,
+        now=now,
+    )
+    return firm_id
+
+
 def test_production_policy_refuses_before_reserving_or_calling_gmail(tmp_path):
     conn, request = _setup(tmp_path)
     gmail = RecordingGmailDrafts()
@@ -108,6 +158,65 @@ def test_production_policy_refuses_before_reserving_or_calling_gmail(tmp_path):
 
     assert gmail.create_calls == []
     assert conn.execute("SELECT COUNT(*) FROM sends").fetchone()[0] == 0
+
+
+def test_fca_linked_lead_requires_current_qc_and_explicit_approval_before_reservation(
+    tmp_path,
+):
+    conn, request = _setup(tmp_path)
+    _link_fca_firm(conn, request.lead_id)
+    gmail = RecordingGmailDrafts()
+    service = DraftService(
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        policy=AllowPolicy(),
+        gmail=gmail,
+    )
+
+    with pytest.raises(DraftPolicyRefused, match="FCA_QC_APPROVAL_REQUIRED"):
+        service.create_review_draft(
+            conn,
+            request,
+            now=datetime(2026, 7, 21, 8, 30, tzinfo=UTC),
+        )
+
+    assert gmail.create_calls == []
+    assert conn.execute("SELECT COUNT(*) FROM sends").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM app_state").fetchone()[0] == 0
+
+
+def test_fca_rejection_at_reservation_boundary_prevents_ledger_and_gmail(tmp_path):
+    conn, request = _setup(tmp_path)
+    now = datetime(2026, 7, 21, 8, 30, tzinfo=UTC)
+    firm_id = _approve_fca_firm(conn, request.lead_id, now=now)
+    gmail = RecordingGmailDrafts()
+
+    class RejectingAtReservationGuard(SendGuard):
+        def reserve(self, conn, request, *, now, validator=None):
+            review_firm(
+                conn,
+                firm_id=firm_id,
+                decision="rejected",
+                qc_run_id=None,
+                notes="Boundary review",
+                rejection_reason="Withdrawn immediately before reservation",
+                now=now + timedelta(seconds=1),
+            )
+            if validator is None:
+                return super().reserve(conn, request, now=now)
+            return super().reserve(conn, request, now=now, validator=validator)
+
+    service = DraftService(
+        guard=RejectingAtReservationGuard(load_settings(ROOT / "config/default.toml")),
+        policy=AllowPolicy(),
+        gmail=gmail,
+    )
+
+    with pytest.raises(DraftPolicyRefused, match="FCA_QC_APPROVAL_REQUIRED"):
+        service.create_review_draft(conn, request, now=now)
+
+    assert gmail.create_calls == []
+    assert conn.execute("SELECT COUNT(*) FROM sends").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM app_state").fetchone()[0] == 0
 
 
 def test_passing_policy_creates_plain_review_draft_and_finalises_ledger(tmp_path):

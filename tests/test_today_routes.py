@@ -90,25 +90,57 @@ def test_today_shows_authoritative_counter_and_fail_closed_lint_lock(tmp_path):
     assert "Production drafting locked: LINT_NOT_READY" in page
 
 
-def test_today_shows_read_only_lca_candidate_staging_separately_from_leads(tmp_path):
+def test_today_shows_branded_fca_evidence_score_and_review_controls(tmp_path):
     database = tmp_path / "govscout.sqlite3"
     conn = connect_database(database)
     migrate(conn)
-    source_url = (
-        "https://www.legionellacontrolassociation.co.uk/company/example-limited/"
-    )
-    conn.execute(
+    source_url = "https://register.fca.org.uk/s/firm?id=123456"
+    firm_id = conn.execute(
         """
-        INSERT INTO candidates (
-            source_register, source_url, company_name, source_location,
-            source_record_hash, discovered_at, last_seen_at
-        ) VALUES ('LCA member directory', ?, 'Example Limited', 'London', ?, ?, ?)
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, firm_type, is_active, source_url,
+            website_url, source_location, company_number, source_record_hash,
+            first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example Finance Ltd', 'Authorised', 'Regulated firm',
+            1, ?, 'https://example.test/', 'London', '12345678', ?, ?, ?)
         """,
         (
             source_url,
             "a" * 64,
-            "2026-07-20T14:00:00+00:00",
-            "2026-07-20T14:00:00+00:00",
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:00:00+00:00",
+        ),
+    ).lastrowid
+    run_id = conn.execute(
+        """
+        INSERT INTO enrichment_runs (
+            firm_id, state, started_at, website_url, input_hash
+        ) VALUES (?, 'running', ?, 'https://example.test/', ?)
+        """,
+        (firm_id, "2026-07-25T10:00:00+00:00", "a" * 64),
+    ).lastrowid
+    conn.execute(
+        """
+        INSERT INTO evidence_items (
+            run_id, signal_group, code, evidence_state, weight,
+            source_url, excerpt, observed_at, content_hash
+        ) VALUES (?, 'ai_exposure', 'AI_VISIBLE', 'present', 30,
+            'https://example.test/', 'AI-powered assistant', ?, ?)
+        """,
+        (run_id, "2026-07-25T10:00:00+00:00", "c" * 64),
+    )
+    conn.execute(
+        """
+        UPDATE enrichment_runs
+        SET state = 'complete', completed_at = ?, final_url = ?, page_hash = ?,
+            score = 82, temperature = 'HOT'
+        WHERE id = ? AND state = 'running'
+        """,
+        (
+            "2026-07-25T10:01:00+00:00",
+            "https://example.test/",
+            "b" * 64,
+            run_id,
         ),
     )
     conn.close()
@@ -119,12 +151,89 @@ def test_today_shows_read_only_lca_candidate_staging_separately_from_leads(tmp_p
 
     page = app.test_client().get("/today").get_data(as_text=True)
 
-    assert "Candidate staging" in page
-    assert "Example Limited" in page
+    assert "FCA-first review" in page
+    assert "Example Finance Ltd" in page
     assert "London" in page
     assert f'href="{source_url}"' in page
-    assert "Awaiting Companies House and contact verification" in page
+    assert "123456" in page
+    assert "82" in page
+    assert "HOT" in page
+    assert "AI_VISIBLE" in page
+    assert "AI-powered assistant" in page
+    assert 'action="/today/review/1"' in page
     assert 'action="/today/draft/' not in page
+
+
+def test_today_rejection_requires_csrf_and_reason_and_stays_outreach_ineligible(tmp_path):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example Finance Ltd', 'Authorised', 1, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            "a" * 64,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:00:00+00:00",
+        ),
+    ).lastrowid
+    conn.close()
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        now_provider=lambda: datetime(2026, 7, 25, 11, tzinfo=UTC),
+    )
+    client = app.test_client()
+    client.get("/today")
+    with client.session_transaction() as browser_session:
+        token = browser_session["csrf_token"]
+
+    missing = client.post(
+        f"/today/review/{firm_id}",
+        data={"csrf_token": token, "decision": "rejected"},
+    )
+    accepted = client.post(
+        f"/today/review/{firm_id}",
+        data={
+            "csrf_token": token,
+            "decision": "rejected",
+            "rejection_reason": "Evidence is not sufficiently specific",
+            "notes": "Recheck next quarter",
+        },
+    )
+    revised = client.post(
+        f"/today/review/{firm_id}",
+        data={
+            "csrf_token": token,
+            "decision": "rejected",
+            "rejection_reason": "Latest decision",
+            "notes": "Latest review note",
+        },
+    )
+
+    assert missing.status_code == 422
+    assert accepted.status_code == 303
+    assert revised.status_code == 303
+    verify = connect_database(database)
+    rows = verify.execute(
+        """
+        SELECT decision, rejection_reason FROM firm_reviews
+        WHERE firm_id = ? ORDER BY id
+        """,
+        (firm_id,),
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("rejected", "Evidence is not sufficiently specific"),
+        ("rejected", "Latest decision"),
+    ]
+    page = client.get("/today").get_data(as_text=True)
+    assert "Latest review note" in page
+    assert "Recheck next quarter" not in page
 
 
 def test_today_rejects_non_loopback_host_header(tmp_path):

@@ -1,10 +1,10 @@
 # GovScout
 
-GovScout is Mise's review-first lead and cold-outreach application. The P1 checkpoint establishes the safety boundary: incorporated entities only, one auditable sends ledger, concurrency-safe daily capacity, Gmail drafts only, and no autonomous send path.
+GovScout is Mise's review-first lead and cold-outreach application. Its active v1 beachhead is small FCA-regulated firms. FCA records are staged as discovery evidence, matched to active incorporated Companies House entities, enriched from bounded public website evidence, checked by fail-closed QC, and explicitly approved or rejected by a human. The existing outreach boundary remains intact: one auditable sends ledger, concurrency-safe daily capacity, Gmail drafts only, and no autonomous send path.
 
 ## Current status
 
-P1 is deliberately **fail-closed for production drafting**. The complete copy lint suite arrives in P4; until then, live draft commands and `/today` report `LINT_NOT_READY` before capacity is reserved or Gmail is contacted.
+The FCA-first discovery, enrichment, QC and review pipeline is available, while production drafting remains deliberately **fail-closed**. Until the complete copy lint suite exists, live draft commands and `/today` report `LINT_NOT_READY` before capacity is reserved or Gmail is contacted.
 
 No Gmail OAuth credentials are required for the current checkpoint. Credential and token files must remain outside this repository.
 
@@ -20,7 +20,9 @@ No Gmail OAuth credentials are required for the current checkpoint. Credential a
 - Exact retries are idempotent; ambiguous Gmail outcomes stay counted until reconciled.
 - Undo deletes the Gmail draft before voiding—not deleting—the ledger row.
 - Company eligibility is derived from Companies House profile evidence, not caller-supplied labels.
-- Public directory records enter a separate discovery-only staging table; they are not leads and cannot be drafted.
+- FCA Register records enter a separate discovery-only staging table; they are not leads and cannot be drafted.
+- Only an active incorporated Companies House verification receipt can promote an FCA firm into `leads`.
+- Website enrichment stores source-linked evidence and honest unknown/failure states; current passing QC plus explicit human approval is required for outreach readiness.
 
 ## Development setup
 
@@ -46,14 +48,18 @@ Set `GOVSCOUT_DATABASE` or `GOVSCOUT_CONFIG` to use explicit local paths. See `.
 ```bash
 govscout sends --today
 govscout sends --week
-govscout harvest-lca --limit 25
-govscout candidates --limit 25
+govscout ingest-fca --input /path/to/fca-export.json --limit 25
+govscout fca-firms --limit 25
+govscout enrich-fca <firm-id>
+govscout qc-fca <firm-id>
 govscout draft <lead-id>
 govscout draft-batch
 govscout send-undo <send-id>
 ```
 
-`harvest-lca` fetches only the fixed public Legionella Control Association directory URL and stages a deterministic sample of 1–50 source records. It performs no Companies House verification, contact discovery, signal scanning, drafting or outreach. Exact reruns refresh `last_seen_at`; changed source evidence fails closed for review.
+`ingest-fca` accepts a bounded, validated JSON export of FCA Register evidence. It stages discovery records only; it does not create leads, contacts, drafts or outreach. Exact reruns are idempotent and changed records append an immutable observation rather than rewriting history. Live FCA acquisition remains a separately gated source integration—do not describe fixture or operator-supplied exports as live harvests.
+
+`enrich-fca` scans the staged firm's public HTTPS website through a bounded, no-redirect, public-address-only transport. `qc-fca` checks source freshness, site/enrichment health, duplicate websites, evidence completeness and contradictions. A record remains outreach-ineligible until QC passes and a human approves it in `/today`.
 
 Draft-adjacent commands show the same authoritative capacity counter used by the web application. In the present production configuration, drafting stays locked with `LINT_NOT_READY`.
 
@@ -78,7 +84,7 @@ TS_IP=$(tailscale ip -4)
 govscout web --host "$TS_IP" --port 8766
 ```
 
-GovScout accepts only IP literals in loopback or Tailscale address ranges. Hostnames (including `localhost`), scoped IPv6 addresses, wildcard, LAN and public-IP binds are refused. Requests must also carry a strictly parsed Host header explicitly trusted for that process. `/today` displays capacity, warnings, lock state, read-only candidate staging and the separate due worklist; POST actions are protected by session CSRF tokens and repeat policy/sendguard checks server-side.
+GovScout accepts only IP literals in loopback or Tailscale address ranges. Hostnames (including `localhost`), scoped IPv6 addresses, wildcard, LAN and public-IP binds are refused. Requests must also carry a strictly parsed Host header explicitly trusted for that process. `/today` displays the FCA-first evidence and review queue, current scores and QC state, capacity, warnings, lock state and the separate due worklist. Review and draft POST actions are protected by session CSRF tokens; drafting also repeats policy/sendguard checks server-side.
 
 A hardened user-service template is provided at `deploy/govscout.service`. Before enabling it on a fresh host, create its private data directory with `install -d -m 700 ~/.local/share/govscout`. On the Mise VPS it runs continuously at `http://100.72.212.14:8766/today`, reachable only from H's tailnet. Tailscale is the access gate; GovScout does not expose this port on the public interface.
 
@@ -86,6 +92,27 @@ A hardened user-service template is provided at `deploy/govscout.service`. Befor
 
 Defaults and numbered SQL migrations are package resources, so installed wheels do not depend on a source checkout. Migrations run transactionally and applied versions are checksum-verified.
 
-## Live Gmail gate
+## Production browser access
 
+GovScout is intended to run once on the Mise VPS. H's PC is a browser client; it
+does not need Python, a repository clone, or a second SQLite database. The planned
+authenticated address is:
+
+```text
+https://leads.misegroup.co.uk
+```
+
+Public mode is deliberately separate from local/Tailscale development mode. It
+requires the exact public hostname, a loopback-only Gunicorn bind, a validated
+single-user password hash, a persistent session secret, HTTPS cookies, CSRF, and
+SQLite-backed login throttling. It refuses startup when any required setting is
+missing or invalid. Caddy terminates HTTPS and proxies to `127.0.0.1`; the Flask
+development server is not the production runtime.
+
+The versioned Caddy, systemd and environment templates, together with DNS,
+backup, migration, health-check and rollback instructions, live in
+`deploy/production/v1/RUNBOOK.md`. Never commit the populated production
+environment file or a plaintext login password.
+
+## Live Gmail gate
 Do not add credentials or perform a mailbox action during ordinary local development. OAuth setup and one harmless live-draft verification require separate, explicit approval. Production drafting remains locked until the complete GovScout lint policy exists and passes.

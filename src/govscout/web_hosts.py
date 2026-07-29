@@ -7,6 +7,7 @@ import re
 TAILSCALE_IPV4 = ip_network("100.64.0.0/10")
 TAILSCALE_IPV6 = ip_network("fd7a:115c:a1e0::/48")
 _BRACKETED_HOST = re.compile(r"^\[([^\]]+)\](?::([0-9]+))?$")
+_DNS_HOST = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 def canonical_safe_bind_host(value: str) -> str:
@@ -57,7 +58,8 @@ def parse_host_header(value: str) -> str | None:
     try:
         address = ip_address(host_text)
     except ValueError:
-        return None
+        canonical_name = host_text.lower()
+        return canonical_name if _DNS_HOST.fullmatch(canonical_name) else None
     if not isinstance(address, IPv4Address):
         return None
     return str(address)
