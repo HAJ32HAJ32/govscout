@@ -15,7 +15,6 @@ from govscout.db import connect_database, migrate
 from govscout.sendguard import SendGuard
 from govscout.web_hosts import parse_host_header
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -86,7 +85,9 @@ def test_locked_web_runtime_is_local_only_and_requires_no_gmail(monkeypatch, tmp
     assert args.host == "127.0.0.1"
     assert args.port == 5050
     assert response.status_code == 200
-    assert "Production drafting locked: LINT_NOT_READY" in response.get_data(as_text=True)
+    page = response.get_data(as_text=True)
+    assert "Email drafting is off for now" in page
+    assert "System status: LINT_NOT_READY" in page
 
 
 def test_web_host_allows_loopback_and_tailscale_only():

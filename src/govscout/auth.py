@@ -8,13 +8,14 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-
 SCRYPT_N = 2**15
 SCRYPT_R = 8
 SCRYPT_P = 1
 SCRYPT_DKLEN = 32
 SCRYPT_MAXMEM = 64 * 1024 * 1024
 PUBLIC_HOST = "leads.misegroup.co.uk"
+COLLECTOR_REQUEST_LIMIT = 12
+COLLECTOR_REQUEST_WINDOW = timedelta(hours=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +123,158 @@ def verify_password(password: str, encoded: str) -> bool:
     except (ValueError, TypeError, UnicodeError):
         return False
     return hmac.compare_digest(actual, expected)
+
+
+@dataclass(frozen=True, slots=True)
+class CollectorCredential:
+    device_id: str
+    token: str
+
+
+def _collector_instant(now: datetime) -> datetime:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("collector credential time must be timezone-aware")
+    return now.astimezone(UTC)
+
+
+def _collector_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("ascii")).hexdigest()
+
+
+def create_collector_device(
+    conn: sqlite3.Connection,
+    *,
+    display_name: str,
+    now: datetime,
+) -> CollectorCredential:
+    if not isinstance(display_name, str) or not display_name.strip():
+        raise ValueError("collector device name must be non-empty text")
+    name = display_name.strip()
+    if len(name) > 80:
+        raise ValueError("collector device name must be at most 80 characters")
+    instant = _collector_instant(now)
+    device_id = secrets.token_hex(16)
+    token = f"gsc_{device_id}_{secrets.token_urlsafe(32)}"
+    conn.execute(
+        """
+        INSERT INTO collector_devices (
+            device_id, display_name, token_hash, created_at
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (device_id, name, _collector_token_hash(token), instant.isoformat()),
+    )
+    return CollectorCredential(device_id=device_id, token=token)
+
+
+def authenticate_collector_token(
+    conn: sqlite3.Connection,
+    token: str,
+    *,
+    now: datetime,
+) -> str | None:
+    instant = _collector_instant(now)
+    if not isinstance(token, str):
+        return None
+    try:
+        prefix, device_id, secret = token.split("_", 2)
+        token.encode("ascii")
+    except (ValueError, UnicodeEncodeError):
+        return None
+    if (
+        prefix != "gsc"
+        or len(device_id) != 32
+        or any(character not in "0123456789abcdef" for character in device_id)
+        or len(secret) != 43
+        or any(
+            character
+            not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+            for character in secret
+        )
+    ):
+        return None
+    row = conn.execute(
+        """
+        SELECT token_hash, scope, created_at, revoked_at
+        FROM collector_devices WHERE device_id = ?
+        """,
+        (device_id,),
+    ).fetchone()
+    if (
+        row is None
+        or row["scope"] != "fca_upload"
+        or row["revoked_at"] is not None
+        or datetime.fromisoformat(row["created_at"]) > instant
+        or not hmac.compare_digest(_collector_token_hash(token), row["token_hash"])
+    ):
+        return None
+    conn.execute(
+        "UPDATE collector_devices SET last_used_at = ? WHERE device_id = ?",
+        (instant.isoformat(), device_id),
+    )
+    return device_id
+
+
+def admit_collector_request(
+    conn: sqlite3.Connection,
+    *,
+    device_id: str,
+    now: datetime,
+) -> bool:
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError("collector admission transaction is not active")
+    instant = _collector_instant(now)
+    row = conn.execute(
+        """
+        SELECT request_window_started_at, request_count, revoked_at
+        FROM collector_devices WHERE device_id = ?
+        """,
+        (device_id,),
+    ).fetchone()
+    if row is None or row["revoked_at"] is not None:
+        return False
+    window_started = (
+        datetime.fromisoformat(row["request_window_started_at"])
+        if row["request_window_started_at"] is not None
+        else None
+    )
+    if window_started is None or instant - window_started >= COLLECTOR_REQUEST_WINDOW:
+        count = 1
+        window_started = instant
+    elif instant < window_started or row["request_count"] >= COLLECTOR_REQUEST_LIMIT:
+        return False
+    else:
+        count = row["request_count"] + 1
+    conn.execute(
+        """
+        UPDATE collector_devices
+        SET request_window_started_at = ?, request_count = ?
+        WHERE device_id = ? AND revoked_at IS NULL
+        """,
+        (window_started.isoformat(), count, device_id),
+    )
+    return True
+
+
+def revoke_collector_device(
+    conn: sqlite3.Connection,
+    *,
+    device_id: str,
+    now: datetime,
+) -> None:
+    instant = _collector_instant(now)
+    row = conn.execute(
+        "SELECT created_at, revoked_at FROM collector_devices WHERE device_id = ?",
+        (device_id,),
+    ).fetchone()
+    if row is None:
+        raise KeyError("collector device not found")
+    if datetime.fromisoformat(row["created_at"]) > instant:
+        raise ValueError("collector device cannot be revoked before it was created")
+    if row["revoked_at"] is None:
+        conn.execute(
+            "UPDATE collector_devices SET revoked_at = ? WHERE device_id = ?",
+            (instant.isoformat(), device_id),
+        )
 
 
 @dataclass(frozen=True, slots=True)

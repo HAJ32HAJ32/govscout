@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-import re
 from threading import Event, Thread
 
 import pytest
@@ -12,7 +12,6 @@ from govscout.config import load_settings
 from govscout.db import connect_database, migrate
 from govscout.sendguard import SendGuard
 from govscout.web.app import create_app
-
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_HOST = "leads.misegroup.co.uk"
@@ -95,11 +94,41 @@ def test_valid_login_rotates_session_and_allows_today_with_secure_cookie(tmp_pat
         assert browser_session.permanent is True
     page = client.get("/today", base_url=BASE_URL)
     assert page.status_code == 200
-    assert "FCA-first review" in page.get_data(as_text=True)
+    assert "Review possible firms for MISE" in page.get_data(as_text=True)
     assert 'action="/logout"' in page.get_data(as_text=True)
 
 
-def test_login_requires_csrf_and_rejects_external_redirects(tmp_path):
+def test_login_from_site_root_goes_to_today(tmp_path):
+    app, _database = _public_app(tmp_path)
+    client = app.test_client()
+
+    landing = client.get("/", base_url=BASE_URL)
+    assert landing.status_code == 302
+    assert landing.headers["Location"] == "/login?next=/"
+
+    login_page = client.get(landing.headers["Location"], base_url=BASE_URL)
+    with client.session_transaction(base_url=BASE_URL) as browser_session:
+        token = browser_session["csrf_token"]
+    response = client.post(
+        "/login",
+        base_url=BASE_URL,
+        data={
+            "csrf_token": token,
+            "username": "operator",
+            "password": "test-password",
+            "next": "/",
+        },
+    )
+
+    assert login_page.status_code == 200
+    assert response.status_code == 303
+    assert response.headers["Location"] == "/today"
+    already_authenticated = client.get("/login?next=/", base_url=BASE_URL)
+    assert already_authenticated.status_code == 302
+    assert already_authenticated.headers["Location"] == "/today"
+
+
+def test_login_requires_csrf(tmp_path):
     app, _database = _public_app(tmp_path)
     client = app.test_client()
 
@@ -108,9 +137,25 @@ def test_login_requires_csrf_and_rejects_external_redirects(tmp_path):
         base_url=BASE_URL,
         data={"username": "operator", "password": "test-password"},
     )
-    _page, accepted = _login(client, next_path="//attacker.example/steal")
 
     assert missing_csrf.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "unsafe_next",
+    (
+        "//attacker.example/steal",
+        "https://attacker.example/steal",
+        "/\\attacker.example/steal",
+        "\\attacker.example/steal",
+    ),
+)
+def test_login_rejects_unsafe_redirects(tmp_path, unsafe_next):
+    app, _database = _public_app(tmp_path)
+    client = app.test_client()
+
+    _page, accepted = _login(client, next_path=unsafe_next)
+
     assert accepted.status_code == 303
     assert accepted.headers["Location"] == "/today"
 

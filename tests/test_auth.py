@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from threading import Barrier, Thread
 
 import pytest
 
-from govscout.auth import LoginThrottle, hash_password, verify_password
+from govscout.auth import (
+    LoginThrottle,
+    authenticate_collector_token,
+    create_collector_device,
+    hash_password,
+    revoke_collector_device,
+    verify_password,
+)
 from govscout.db import connect_database, migrate
 
 
@@ -31,6 +39,55 @@ def test_versioned_scrypt_hash_verifies_only_the_right_password():
 )
 def test_malformed_or_unsupported_password_hashes_fail_closed(encoded):
     assert verify_password("anything", encoded) is False
+
+
+def test_collector_device_token_is_one_purpose_hashed_and_revocable(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    issued_at = datetime(2026, 7, 30, 10, tzinfo=UTC)
+
+    credential = create_collector_device(
+        conn,
+        display_name="H Windows PC",
+        now=issued_at,
+    )
+
+    assert credential.token.startswith(f"gsc_{credential.device_id}_")
+    stored = conn.execute(
+        "SELECT display_name, token_hash, last_used_at, revoked_at FROM collector_devices"
+    ).fetchone()
+    assert stored["display_name"] == "H Windows PC"
+    assert credential.token not in tuple(stored)
+    assert len(stored["token_hash"]) == 64
+    assert conn.execute("SELECT scope FROM collector_devices").fetchone()[0] == "fca_upload"
+    assert authenticate_collector_token(
+        conn,
+        credential.token,
+        now=issued_at + timedelta(minutes=1),
+    ) == credential.device_id
+    assert authenticate_collector_token(
+        conn,
+        credential.token + "x",
+        now=issued_at + timedelta(minutes=2),
+    ) is None
+
+    revoke_collector_device(
+        conn,
+        device_id=credential.device_id,
+        now=issued_at + timedelta(minutes=3),
+    )
+
+    assert authenticate_collector_token(
+        conn,
+        credential.token,
+        now=issued_at + timedelta(minutes=4),
+    ) is None
+
+    with pytest.raises(sqlite3.IntegrityError, match="revocation is immutable"):
+        conn.execute(
+            "UPDATE collector_devices SET revoked_at = NULL WHERE device_id = ?",
+            (credential.device_id,),
+        )
 
 
 def test_sqlite_throttle_blocks_at_limit_and_recovers_after_expiry(tmp_path):
@@ -74,7 +131,7 @@ def test_sqlite_throttle_atomically_reserves_only_one_concurrent_admission(tmp_p
                 )
             )
             conn.close()
-        except Exception as exc:  # pragma: no cover - asserted below
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover - asserted below
             errors.append(exc)
 
     workers = [Thread(target=reserve_from_worker) for _ in range(2)]
@@ -112,7 +169,7 @@ def test_sqlite_throttle_serializes_failures_from_multiple_worker_connections(tm
             assert admission.token is not None
             throttle.finalize_failure(conn, token=admission.token, now=instant)
             conn.close()
-        except Exception as exc:  # pragma: no cover - asserted below
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover - asserted below
             errors.append(exc)
 
     workers = [Thread(target=fail_from_worker, args=(worker,)) for worker in range(8)]

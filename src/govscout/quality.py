@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 import sqlite3
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from govscout.db import ALLOWED_LEGAL_FORMS
-
 
 FCA_MAX_AGE = timedelta(days=30)
 COMPANIES_HOUSE_MAX_AGE = timedelta(days=30)
@@ -250,7 +249,7 @@ def run_qc(conn: sqlite3.Connection, *, firm_id: int, now: datetime) -> QcResult
     return QcResult(int(qc_run_id), passed, ordered_reasons)
 
 
-def _qc_is_current(
+def qc_is_current(
     conn: sqlite3.Connection,
     *,
     firm_id: int,
@@ -301,7 +300,7 @@ def review_firm(
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     if decision == "approved":
-        if qc_run_id is None or not _qc_is_current(
+        if qc_run_id is None or not qc_is_current(
             conn, firm_id=firm_id, qc_run_id=qc_run_id, now=now
         ):
             raise ValueError("approval requires passing current QC")
@@ -337,5 +336,5 @@ def is_outreach_ready(conn: sqlite3.Connection, *, firm_id: int, now: datetime) 
         review
         and review["decision"] == "approved"
         and review["qc_run_id"] is not None
-        and _qc_is_current(conn, firm_id=firm_id, qc_run_id=review["qc_run_id"], now=now)
+        and qc_is_current(conn, firm_id=firm_id, qc_run_id=review["qc_run_id"], now=now)
     )

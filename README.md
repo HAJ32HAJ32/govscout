@@ -52,12 +52,51 @@ govscout ingest-fca --input /path/to/fca-export.json --limit 25
 govscout fca-firms --limit 25
 govscout enrich-fca <firm-id>
 govscout qc-fca <firm-id>
+govscout collector-device-add --name "H Windows PC"
+govscout collector-device-revoke <device-id>
 govscout draft <lead-id>
 govscout draft-batch
 govscout send-undo <send-id>
 ```
 
-`ingest-fca` accepts a bounded, validated JSON export of FCA Register evidence. It stages discovery records only; it does not create leads, contacts, drafts or outreach. Exact reruns are idempotent and changed records append an immutable observation rather than rewriting history. Live FCA acquisition remains a separately gated source integration—do not describe fixture or operator-supplied exports as live harvests.
+`ingest-fca` accepts a bounded, validated JSON export of FCA Register evidence. It stages discovery records only; it does not create leads, contacts, drafts or outreach. Exact reruns are idempotent and changed records append an immutable observation rather than rewriting history. Operator-supplied exports are not live harvests; authenticated official-API acquisition is confined to the Collector described below.
+
+## GovScout Collector private test
+
+GovScout Collector is the Windows/macOS desktop route for the first FCA batch. It uses the
+official FS Register API only—never browser scraping—and uploads no more than 25 active firms
+per batch to the discovery-only staging tables. It cannot create Companies House matches,
+approve firms, draft messages or send email.
+
+Create a one-purpose upload token on the VPS:
+
+```bash
+govscout collector-device-add --name "H Windows PC"
+```
+
+The token is shown once. Enter it in Collector with the registered FCA API email/key. Collector
+stores all three values in Windows Credential Manager or macOS Keychain, keeps retryable payloads
+in a private local SQLite outbox, refuses redirects, and uploads only to
+`https://leads.misegroup.co.uk/api/v1/collector/imports`.
+The outbox refuses new collections at 25 pending batches or 25 MB, retains at most 100 batch
+records, and prunes terminal records after 30 days. A server-side rejected receipt is shown as a
+failed import, never as a successfully uploaded review batch.
+
+Unsigned private-test builds are published from GitHub tags named `collector-v*`:
+
+- `GovScout-Collector-Windows-x86_64.exe`
+- `GovScout-Collector-macOS-x86_64.zip`
+- `GovScout-Collector-macOS-arm64.zip`
+
+Verify each download against its adjacent `.sha256` file. Windows may show SmartScreen because
+the private-test executable is unsigned. On macOS, unzip it, then right-click the app and choose
+**Open** on first launch. These builds are for H's private testing, not public distribution.
+
+In Collector, enter one to five conservative firm-name search terms and a maximum of 25 firms.
+Requests are serialized below the FCA API's published ceiling. Active results are validated,
+durably queued and auto-uploaded; failed network uploads keep the same idempotency key for retry.
+The exact authenticated API contract must still be checked against the FCA developer portal during
+private testing; the portal documentation was not accessible from the build environment.
 
 `enrich-fca` scans the staged firm's public HTTPS website through a bounded, no-redirect, public-address-only transport. `qc-fca` checks source freshness, site/enrichment health, duplicate websites, evidence completeness and contradictions. A record remains outreach-ineligible until QC passes and a human approves it in `/today`.
 
