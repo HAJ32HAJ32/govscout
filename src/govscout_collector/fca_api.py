@@ -205,7 +205,7 @@ class FcaRegisterClient:
             raise ValueError("enter between one and five search terms of at most 80 characters")
 
         frns: list[str] = []
-        candidate_limit = min(limit * 4, FCA_MAX_CANDIDATES)
+        candidate_limit = FCA_MAX_CANDIDATES
         for term in terms:
             for frn in self._search(term, email=email, api_key=api_key):
                 if frn not in frns:

@@ -157,8 +157,13 @@ class CollectorDesktop:
         self._store.save(credentials)
         return credentials
 
+    def _set_busy(self, busy: bool) -> None:
+        state = ["disabled"] if busy else ["!disabled"]
+        self._collect_button.state(state)
+        self._retry_button.state(state)
+
     def _run(self, operation) -> None:
-        self._collect_button.state(["disabled"])
+        self._set_busy(True)
         self._status.set("Working with the official FCA Register…")
 
         def worker() -> None:
@@ -197,11 +202,11 @@ class CollectorDesktop:
         self._run(lambda: self._service.retry_pending(credentials=credentials))
 
     def _finish_error(self, message: str) -> None:
-        self._collect_button.state(["!disabled"])
+        self._set_busy(False)
         self._status.set(f"Could not complete the batch: {message}")
 
     def _finish_success(self, result: SyncResult) -> None:
-        self._collect_button.state(["!disabled"])
+        self._set_busy(False)
         if result.errors:
             self._status.set(
                 f"Uploaded {result.uploaded}; {result.pending} still pending. "
