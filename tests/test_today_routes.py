@@ -14,7 +14,6 @@ from tests.support import (
     verified_company_from_test_profile as verified_company_from_profile,
 )
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -86,8 +85,11 @@ def test_today_shows_authoritative_counter_and_fail_closed_lint_lock(tmp_path):
 
     assert response.status_code == 200
     page = response.get_data(as_text=True)
-    assert "Drafts today: 0 / 10 soft / 5 effective hard" in page
-    assert "Production drafting locked: LINT_NOT_READY" in page
+    assert "Drafts today: 0 of 5" in page
+    assert "Email drafting is off for now" in page
+    assert "You can still review and approve firms" in page
+    assert "System status: LINT_NOT_READY" in page
+    assert "effective hard" not in page
 
 
 def test_today_shows_branded_fca_evidence_score_and_review_controls(tmp_path):
@@ -151,17 +153,88 @@ def test_today_shows_branded_fca_evidence_score_and_review_controls(tmp_path):
 
     page = app.test_client().get("/today").get_data(as_text=True)
 
-    assert "FCA-first review" in page
+    assert "Review possible firms for MISE" in page
+    assert "Firms to review" in page
     assert "Example Finance Ltd" in page
     assert "London" in page
     assert f'href="{source_url}"' in page
     assert "123456" in page
     assert "82" in page
-    assert "HOT" in page
-    assert "AI_VISIBLE" in page
+    assert "High priority" in page
+    assert "AI exposure" in page
+    assert "Found" in page
+    assert "AI_VISIBLE" not in page
     assert "AI-powered assistant" in page
     assert 'action="/today/review/1"' in page
     assert 'action="/today/draft/' not in page
+    assert '<label>Reason for rejecting<input name="rejection_reason"' in page
+
+
+def test_today_does_not_present_expired_qc_as_passing_or_approvable(tmp_path):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Expired QC Ltd', 'Authorised', 1, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            "a" * 64,
+            "2026-07-01T10:00:00+00:00",
+            "2026-07-01T10:00:00+00:00",
+        ),
+    ).lastrowid
+    run_id = conn.execute(
+        """
+        INSERT INTO enrichment_runs (
+            firm_id, state, started_at, completed_at, website_url, final_url,
+            input_hash, page_hash, score, temperature
+        ) VALUES (?, 'complete', ?, ?, 'https://example.test/',
+            'https://example.test/', ?, ?, 50, 'WARM')
+        """,
+        (
+            firm_id,
+            "2026-07-01T10:00:00+00:00",
+            "2026-07-01T10:01:00+00:00",
+            "b" * 64,
+            "c" * 64,
+        ),
+    ).lastrowid
+    conn.execute(
+        """
+        INSERT INTO qc_runs (
+            firm_id, enrichment_run_id, state, reason_codes, input_hash,
+            checked_at, expires_at
+        ) VALUES (?, ?, 'pass', '[]', ?, ?, ?)
+        """,
+        (
+            firm_id,
+            run_id,
+            "d" * 64,
+            "2026-07-01T10:02:00+00:00",
+            "2026-07-02T10:02:00+00:00",
+        ),
+    )
+    conn.close()
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        now_provider=lambda: datetime(2026, 7, 29, 9, tzinfo=UTC),
+    )
+
+    page = app.test_client().get("/today").get_data(as_text=True)
+
+    assert "Needs a fresh check" in page
+    assert 'value="approved" disabled aria-describedby="approval-help-1"' in page
+    assert '<p id="approval-help-1"' in page
+    assert "The checks must be current before approval" in page
+    assert "Checks:</strong>\n            Passed" not in page
+    assert "Company match not available" in page
+    assert "Company not checked yet" not in page
 
 
 def test_today_rejection_requires_csrf_and_reason_and_stays_outreach_ineligible(tmp_path):
@@ -415,8 +488,8 @@ def test_batch_drafts_followups_first_and_rolls_over_at_effective_limit(tmp_path
     app.testing = True
     client = app.test_client()
     page = client.get("/today").get_data(as_text=True)
-    assert page.index("Lead 6") < page.index("Lead 1")
-    assert page.index("Lead 7") < page.index("Lead 1")
+    assert page.index("Firm 6") < page.index("Firm 1")
+    assert page.index("Firm 7") < page.index("Firm 1")
     assert 'action="/today/drafts"' in page
     assert 'name="csrf_token"' in page
     with client.session_transaction() as session:

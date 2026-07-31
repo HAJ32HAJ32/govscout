@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 import hashlib
 import json
 import re
 import sqlite3
-from typing import Sequence
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlsplit
 
-
 FCA_MAX_RESPONSE_BYTES = 1_000_000
+FCA_MAX_CANONICAL_RECORD_CHARS = 32_768
 FCA_REGISTER_HOST = "register.fca.org.uk"
 ACTIVE_FCA_STATUSES = frozenset(
     {"Authorised", "Registered", "Appointed Representative"}
@@ -109,7 +109,7 @@ def canonicalize_website_url(value: object) -> str | None:
     ):
         raise FcaDataError("website_url host is invalid")
     path = parsed.path or "/"
-    trailing_slash = path.endswith("/") or path.endswith("/.") or path.endswith("/..")
+    trailing_slash = path.endswith(("/", "/.", "/.."))
     segments: list[str] = []
     for segment in path.split("/"):
         if not segment or segment == ".":
@@ -166,6 +166,11 @@ def parse_fca_json(payload: bytes) -> tuple[FcaFirmRecord, ...]:
     records = tuple(_parse_record(item) for item in document["firms"])
     if not records:
         raise FcaDataError("FCA payload contained no firms")
+    if any(
+        len(_canonical_record(record)) > FCA_MAX_CANONICAL_RECORD_CHARS
+        for record in records
+    ):
+        raise FcaDataError("FCA record exceeded the immutable observation limit")
     frns = [record.frn for record in records]
     if len(frns) != len(set(frns)):
         raise FcaDataError("FCA payload contained a duplicate FRN")
@@ -178,21 +183,18 @@ def _canonical_record(record: FcaFirmRecord) -> str:
     )
 
 
-def ingest_fca_records(
-    conn: sqlite3.Connection,
+def _prepare_ingest(
     records: Sequence[FcaFirmRecord],
     *,
     limit: int,
     now: datetime,
-) -> IngestResult:
+) -> tuple[tuple[FcaFirmRecord, ...], int, str]:
     if not 1 <= limit <= 100:
         raise ValueError("FCA ingestion limit must be between 1 and 100")
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
     if not records:
         raise FcaDataError("FCA payload contained no firms")
-    if conn.in_transaction:
-        raise sqlite3.OperationalError("FCA ingestion requires no active transaction")
     ordered = sorted(records, key=lambda item: item.frn)
     staged_count = min(limit, len(ordered))
     if staged_count == 1:
@@ -202,66 +204,107 @@ def ingest_fca_records(
             ordered[round(index * (len(ordered) - 1) / (staged_count - 1))]
             for index in range(staged_count)
         )
-    observed_at = now.astimezone(UTC).isoformat()
+    return selected, staged_count, now.astimezone(UTC).isoformat()
+
+
+def _write_fca_records(
+    conn: sqlite3.Connection,
+    *,
+    selected: Sequence[FcaFirmRecord],
+    observed_at: str,
+) -> tuple[int, int]:
     created_count = 0
     changed_count = 0
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        for record in selected:
-            canonical = _canonical_record(record)
-            record_hash = hashlib.sha256(canonical.encode()).hexdigest()
-            existing = conn.execute(
-                "SELECT id, source_record_hash, last_seen_at FROM fca_firms WHERE frn = ?",
-                (record.frn,),
-            ).fetchone()
-            if existing is not None and existing["last_seen_at"] > observed_at:
-                raise FcaDataError(f"FCA observation for FRN {record.frn} is stale")
-            values = (
-                record.firm_name,
-                record.fca_status,
-                record.firm_type,
-                int(record.is_active),
-                record.source_url,
-                record.website_url,
-                record.source_location,
-                record.company_number,
-                record_hash,
-                observed_at,
-            )
-            if existing is None:
-                firm_id = conn.execute(
-                    """
-                    INSERT INTO fca_firms (
-                        frn, firm_name, fca_status, firm_type, is_active,
-                        source_url, website_url, source_location, company_number,
-                        source_record_hash, first_seen_at, last_seen_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (record.frn, *values, observed_at),
-                ).lastrowid
-                created_count += 1
-            else:
-                firm_id = existing["id"]
-                if existing["source_record_hash"] != record_hash:
-                    changed_count += 1
-                conn.execute(
-                    """
-                    UPDATE fca_firms SET
-                        firm_name = ?, fca_status = ?, firm_type = ?, is_active = ?,
-                        source_url = ?, website_url = ?, source_location = ?,
-                        company_number = ?, source_record_hash = ?, last_seen_at = ?
-                    WHERE id = ?
-                    """,
-                    (*values, firm_id),
-                )
+    for record in selected:
+        canonical = _canonical_record(record)
+        record_hash = hashlib.sha256(canonical.encode()).hexdigest()
+        existing = conn.execute(
+            "SELECT id, source_record_hash, last_seen_at FROM fca_firms WHERE frn = ?",
+            (record.frn,),
+        ).fetchone()
+        if existing is not None and existing["last_seen_at"] > observed_at:
+            raise FcaDataError(f"FCA observation for FRN {record.frn} is stale")
+        values = (
+            record.firm_name,
+            record.fca_status,
+            record.firm_type,
+            int(record.is_active),
+            record.source_url,
+            record.website_url,
+            record.source_location,
+            record.company_number,
+            record_hash,
+            observed_at,
+        )
+        if existing is None:
+            firm_id = conn.execute(
+                """
+                INSERT INTO fca_firms (
+                    frn, firm_name, fca_status, firm_type, is_active,
+                    source_url, website_url, source_location, company_number,
+                    source_record_hash, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (record.frn, *values, observed_at),
+            ).lastrowid
+            created_count += 1
+        else:
+            firm_id = existing["id"]
+            if existing["source_record_hash"] != record_hash:
+                changed_count += 1
             conn.execute(
                 """
-                INSERT OR IGNORE INTO fca_observations (
-                    firm_id, observed_at, source_record_hash, canonical_record
-                ) VALUES (?, ?, ?, ?)
+                UPDATE fca_firms SET
+                    firm_name = ?, fca_status = ?, firm_type = ?, is_active = ?,
+                    source_url = ?, website_url = ?, source_location = ?,
+                    company_number = ?, source_record_hash = ?, last_seen_at = ?
+                WHERE id = ?
                 """,
-                (firm_id, observed_at, record_hash, canonical),
+                (*values, firm_id),
             )
+        conn.execute(
+            """
+            INSERT INTO fca_observations (
+                firm_id, observed_at, source_record_hash, canonical_record
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(firm_id, source_record_hash) DO NOTHING
+            """,
+            (firm_id, observed_at, record_hash, canonical),
+        )
+    return created_count, changed_count
+
+
+def _ingest_fca_records_in_transaction(
+    conn: sqlite3.Connection,
+    records: Sequence[FcaFirmRecord],
+    *,
+    limit: int,
+    now: datetime,
+) -> IngestResult:
+    if not conn.in_transaction:
+        raise sqlite3.OperationalError("FCA ingestion transaction is not active")
+    selected, staged_count, observed_at = _prepare_ingest(records, limit=limit, now=now)
+    created_count, changed_count = _write_fca_records(
+        conn, selected=selected, observed_at=observed_at
+    )
+    return IngestResult(len(records), staged_count, created_count, changed_count)
+
+
+def ingest_fca_records(
+    conn: sqlite3.Connection,
+    records: Sequence[FcaFirmRecord],
+    *,
+    limit: int,
+    now: datetime,
+) -> IngestResult:
+    if conn.in_transaction:
+        raise sqlite3.OperationalError("FCA ingestion requires no active transaction")
+    selected, staged_count, observed_at = _prepare_ingest(records, limit=limit, now=now)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        created_count, changed_count = _write_fca_records(
+            conn, selected=selected, observed_at=observed_at
+        )
         conn.execute("COMMIT")
     except Exception:
         if conn.in_transaction:

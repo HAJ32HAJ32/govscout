@@ -1,5 +1,5 @@
-from datetime import UTC, datetime
 import json
+from datetime import UTC, datetime
 
 from govscout.cli import main
 from govscout.db import connect_database, insert_verified_lead, migrate
@@ -65,6 +65,40 @@ def test_cli_has_no_lca_harvest_command():
     choices = parser._subparsers._group_actions[0].choices
     assert "harvest-lca" not in choices
     assert "candidates" not in choices
+
+
+def test_cli_creates_and_revokes_a_scoped_collector_device(tmp_path, capsys):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    now = datetime(2026, 7, 30, 11, tzinfo=UTC)
+
+    assert main(
+        ["collector-device-add", "--name", "H Mac laptop"],
+        conn=conn,
+        now=now,
+    ) == 0
+    output = capsys.readouterr().out
+    conn.close()
+    conn = connect_database(database)
+    device_id = conn.execute("SELECT device_id FROM collector_devices").fetchone()[0]
+    token_line = next(line for line in output.splitlines() if line.startswith("Device token: "))
+    token = token_line.removeprefix("Device token: ")
+    assert device_id in output
+    assert token.startswith(f"gsc_{device_id}_")
+    assert token not in conn.execute("SELECT token_hash FROM collector_devices").fetchone()[0]
+
+    assert main(
+        ["collector-device-revoke", device_id],
+        conn=conn,
+        now=now,
+    ) == 0
+    assert "Collector device revoked" in capsys.readouterr().out
+    conn.close()
+    conn = connect_database(database)
+    assert conn.execute(
+        "SELECT revoked_at FROM collector_devices WHERE device_id = ?", (device_id,)
+    ).fetchone()[0] == now.isoformat()
 
 
 def test_cli_runs_repeatable_enrichment_and_qc_for_one_fca_firm(tmp_path, capsys):

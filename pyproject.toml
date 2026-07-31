@@ -23,9 +23,13 @@ gmail = [
   "google-api-python-client>=2.0,<3",
   "google-auth>=2.0,<3",
 ]
+collector = [
+  "keyring==25.7.0",
+]
 
 [project.scripts]
 govscout = "govscout.cli:main"
+govscout-collector = "govscout_collector.app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

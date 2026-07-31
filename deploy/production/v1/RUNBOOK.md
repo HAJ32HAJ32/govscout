@@ -69,7 +69,7 @@ sudo cp --preserve=mode,ownership,timestamps /var/lib/govscout/govscout.sqlite3 
 sudo sha256sum /var/backups/govscout/govscout.sqlite3.<UTC-timestamp>
 ```
 
-Record the path and checksum outside the VPS. Startup applies numbered migrations in one SQLite `BEGIN IMMEDIATE` transaction and checksum-verifies all prior migrations. Migration 007 adds persistent login-throttle state. Migration 008 installs FCA identity and canonical-URL guards. Treat the verified pre-release database backup as part of the release artefact.
+Record the path and checksum outside the VPS. Startup applies numbered migrations in one SQLite `BEGIN IMMEDIATE` transaction and checksum-verifies all prior migrations. Migration 007 adds persistent login-throttle state. Migration 008 installs FCA identity and canonical-URL guards. Migration 009 adds hashed, revocable collector devices and immutable, payload-bound imports. Treat the verified pre-release database backup as part of the release artefact.
 
 Validate and start:
 
@@ -93,6 +93,18 @@ sudo systemctl is-active govscout caddy
 ```
 
 Expected: login probe succeeds, `/today` returns `302`, and Gunicorn has no wildcard/public listener. Confirm the response has `Secure; HttpOnly; SameSite=Strict`, CSP/frame/nosniff/referrer/cache headers, and HSTS. A forged Host must return 400.
+
+For a private Collector device, issue the upload-only token after the migrated release is active:
+
+```console
+sudo -u govscout GOVSCOUT_DATABASE=/var/lib/govscout/govscout.sqlite3 \
+  /opt/govscout/current/.venv/bin/govscout collector-device-add --name "H Windows PC"
+```
+
+Copy the token directly into the device's secure setup screen; do not put it in the environment
+file, repository, shell scripts or logs. Revoke a lost device immediately with
+`collector-device-revoke <device-id>`. Collector requests are capped per device at 12 per hour
+and 100 immutable imports over that credential's lifetime; retries remain payload-bound.
 
 ## 6. Rollback
 

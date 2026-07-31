@@ -1,7 +1,7 @@
-from datetime import UTC, datetime
 import hashlib
 import os
 import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 
@@ -150,6 +150,8 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         "evidence_items",
         "qc_runs",
         "firm_reviews",
+        "collector_devices",
+        "collector_imports",
         "retirement_events",
         "leads",
         "sends",
@@ -166,7 +168,51 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         ("006", 64),
         ("007", 64),
         ("008", 64),
+        ("009", 64),
     ]
+
+
+def test_collector_schema_keeps_device_secrets_hashed_and_imports_durable(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+
+    conn.execute(
+        """
+        INSERT INTO collector_devices (
+            device_id, display_name, token_hash, created_at
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (
+            "a" * 32,
+            "H Windows PC",
+            "b" * 64,
+            "2026-07-30T10:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO collector_imports (
+            import_id, device_id, payload_sha256, payload_json,
+            state, received_at
+        ) VALUES (?, ?, ?, ?, 'pending', ?)
+        """,
+        (
+            "c" * 32,
+            "a" * 32,
+            "d" * 64,
+            '{"firms":[]}',
+            "2026-07-30T10:01:00+00:00",
+        ),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM collector_imports")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE collector_imports SET payload_json = '{}' ")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM collector_devices")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE collector_devices SET token_hash = ?", ("e" * 64,))
 
 
 def test_fca_schema_fails_closed_on_invalid_identity_and_unevidenced_signal(tmp_path):

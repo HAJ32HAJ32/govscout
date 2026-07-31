@@ -15,7 +15,7 @@
 <body>
   <main>
     <h1>GovScout</h1>
-    <p>Sign in to the private review surface.</p>
+    <p>Sign in to review possible firms for MISE.</p>
     {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
     <form method="post" action="/login">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

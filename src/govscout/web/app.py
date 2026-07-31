@@ -1,22 +1,44 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+import hashlib
 import secrets
 import sqlite3
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from flask import Flask, abort, g, jsonify, redirect, render_template, request, session, url_for
+from flask import (
+    Flask,
+    abort,
+    g,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
+from flask import (
+    Request as FlaskRequest,
+)
 
-from govscout.auth import AuthConfig, LoginThrottle, verify_password
+from govscout.auth import (
+    AuthConfig,
+    LoginThrottle,
+    admit_collector_request,
+    authenticate_collector_token,
+    verify_password,
+)
 from govscout.cli import format_counter
+from govscout.collector_imports import COLLECTOR_BATCH_LIMIT, process_collector_import
 from govscout.draft_service import (
     DraftAlreadySent,
     DraftOutcomeUncertain,
     DraftPolicyRefused,
     DraftService,
 )
-from govscout.quality import review_firm
+from govscout.fca_discovery import FCA_MAX_RESPONSE_BYTES, FcaDataError, parse_fca_json
+from govscout.quality import qc_is_current, review_firm
 from govscout.sendguard import (
     ReservationConflict,
     ReservationRequest,
@@ -24,6 +46,24 @@ from govscout.sendguard import (
     SendLimitExceeded,
 )
 from govscout.web_hosts import canonical_safe_bind_host, parse_host_header
+
+COLLECTOR_IMPORT_PATH = "/api/v1/collector/imports"
+COLLECTOR_IMPORT_LIMIT_PER_DEVICE = 100
+
+
+class GovScoutRequest(FlaskRequest):
+    @property
+    def max_content_length(self) -> int | None:
+        explicit_limit = getattr(self, "_max_content_length", None)
+        if explicit_limit is not None:
+            return explicit_limit
+        if self.path == COLLECTOR_IMPORT_PATH:
+            return FCA_MAX_RESPONSE_BYTES
+        return super().max_content_length
+
+    @max_content_length.setter
+    def max_content_length(self, value: int | None) -> None:
+        self._max_content_length = value
 
 
 class CandidateSource(Protocol):
@@ -44,6 +84,7 @@ def create_app(
     auth: AuthConfig | None = None,
 ) -> Flask:
     app = Flask(__name__)
+    app.request_class = GovScoutRequest
     app.secret_key = auth.session_secret if auth else (csrf_secret or secrets.token_bytes(32))
     app.config.update(
         SESSION_COOKIE_HTTPONLY=True,
@@ -67,6 +108,8 @@ def create_app(
     throttle = LoginThrottle(max_failures=auth.max_failures) if auth else None
 
     def safe_next(value: str | None) -> str:
+        if value == "/":
+            return url_for("today")
         if value and value.startswith("/") and not value.startswith("//") and "\\" not in value:
             return value
         return url_for("today")
@@ -83,12 +126,18 @@ def create_app(
             ):
                 abort(413)
             declared_content_length = int(raw_content_length)
-            if declared_content_length > app.config["MAX_CONTENT_LENGTH"]:
+            if (
+                request.max_content_length is not None
+                and declared_content_length > request.max_content_length
+            ):
                 abort(413)
         host_header = request.environ.get("HTTP_HOST", "")
         hostname = parse_host_header(host_header)
         if hostname not in allowed_hosts:
             abort(400)
+
+        if request.endpoint == "collector_import":
+            return None
 
         auth_exempt = request.endpoint in {"login", "static"}
         if auth is not None and not auth_exempt and session.get("authenticated") is not True:
@@ -194,11 +243,127 @@ def create_app(
         )
         return response
 
-    @app.get("/today")
-    def today():
+    @app.post("/api/v1/collector/imports")
+    def collector_import():
+        if auth is None:
+            abort(404)
+        authorization = request.headers.get("Authorization", "")
+        if not authorization.startswith("Bearer ") or authorization.count(" ") != 1:
+            return jsonify(error="collector_unauthorized"), 401
+        token = authorization.removeprefix("Bearer ")
         conn = conn_factory()
         try:
-            decision = guard.status(conn, now=clock())
+            conn.execute("BEGIN IMMEDIATE")
+            device_id = authenticate_collector_token(conn, token, now=clock())
+            if device_id is None:
+                conn.execute("ROLLBACK")
+                return jsonify(error="collector_unauthorized"), 401
+            if not admit_collector_request(conn, device_id=device_id, now=clock()):
+                conn.execute("COMMIT")
+                return jsonify(error="collector_rate_limited"), 429
+            conn.execute("COMMIT")
+            import_id = request.headers.get("Idempotency-Key", "")
+            claimed_hash = request.headers.get("X-Payload-SHA256", "")
+            if (
+                len(import_id) != 32
+                or any(character not in "0123456789abcdef" for character in import_id)
+                or len(claimed_hash) != 64
+                or any(character not in "0123456789abcdef" for character in claimed_hash)
+            ):
+                return jsonify(error="invalid_import_identity"), 422
+            if request.mimetype != "application/json":
+                return jsonify(error="content_type_required"), 415
+            payload = request.get_data(cache=False)
+            actual_hash = hashlib.sha256(payload).hexdigest()
+            if not secrets.compare_digest(actual_hash, claimed_hash):
+                return jsonify(error="payload_hash_mismatch"), 422
+            try:
+                records = parse_fca_json(payload)
+                payload_text = payload.decode("utf-8")
+            except (FcaDataError, UnicodeDecodeError) as exc:
+                return jsonify(error="invalid_fca_export", detail=str(exc)), 422
+            if len(records) > COLLECTOR_BATCH_LIMIT:
+                return jsonify(error="collector_batch_limit_exceeded"), 422
+
+            conn.execute("BEGIN IMMEDIATE")
+            confirmed_device_id = authenticate_collector_token(conn, token, now=clock())
+            if confirmed_device_id != device_id:
+                conn.execute("ROLLBACK")
+                return jsonify(error="collector_unauthorized"), 401
+            existing = conn.execute(
+                """
+                SELECT import_id, device_id, payload_sha256, state
+                FROM collector_imports
+                WHERE import_id = ?
+                """,
+                (import_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["device_id"] != device_id
+                    or existing["payload_sha256"] != actual_hash
+                ):
+                    conn.execute("ROLLBACK")
+                    return jsonify(error="collector_import_conflict"), 409
+                conn.execute("COMMIT")
+                state = existing["state"]
+                if state == "pending":
+                    state = process_collector_import(
+                        conn,
+                        import_id=existing["import_id"],
+                        now=clock(),
+                    ).state
+                return jsonify(
+                    import_id=existing["import_id"],
+                    payload_sha256=existing["payload_sha256"],
+                    state=state,
+                ), 200
+            import_count = conn.execute(
+                "SELECT count(*) FROM collector_imports WHERE device_id = ?",
+                (device_id,),
+            ).fetchone()[0]
+            if import_count >= COLLECTOR_IMPORT_LIMIT_PER_DEVICE:
+                conn.execute("ROLLBACK")
+                return jsonify(error="collector_storage_limit"), 429
+            conn.execute(
+                """
+                INSERT INTO collector_imports (
+                    import_id, device_id, payload_sha256, payload_json,
+                    state, received_at
+                ) VALUES (?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    import_id,
+                    device_id,
+                    actual_hash,
+                    payload_text,
+                    clock().astimezone(UTC).isoformat(),
+                ),
+            )
+            conn.execute("COMMIT")
+            state = process_collector_import(
+                conn,
+                import_id=import_id,
+                now=clock(),
+            ).state
+        except Exception:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+        return jsonify(
+            import_id=import_id,
+            payload_sha256=actual_hash,
+            state=state,
+        ), 202
+
+    @app.get("/today")
+    def today():
+        current = clock()
+        conn = conn_factory()
+        try:
+            decision = guard.status(conn, now=current)
             firm_rows = conn.execute(
                 """
                 SELECT f.*,
@@ -228,6 +393,15 @@ def create_app(
             fca_firms = []
             for row in firm_rows:
                 item = dict(row)
+                item["qc_current"] = bool(
+                    row["qc_run_id"] is not None
+                    and qc_is_current(
+                        conn,
+                        firm_id=row["id"],
+                        qc_run_id=row["qc_run_id"],
+                        now=current,
+                    )
+                )
                 if row["enrichment_run_id"] is None:
                     item["evidence"] = []
                 else:

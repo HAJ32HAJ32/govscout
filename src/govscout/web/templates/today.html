@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
-  <title>GovScout — Today | FCA-first review</title>
+  <title>GovScout — Review firms</title>
   <style nonce="{{ csp_nonce }}">
     :root { --ink:#17251f; --mise:#154f3b; --mint:#eaf6ef; --line:#d8e2dc; --hot:#9e3023; --warm:#9a6500; --cool:#315d7d; }
     * { box-sizing: border-box; }
@@ -45,86 +45,106 @@
       <button type="submit">Sign out</button>
     </form>
     {% endif %}
-    <h1>GovScout — FCA-first review</h1>
-    <p>Evidence-led prospect review for Mise. FCA discovery, Companies House eligibility, website signals and fail-closed quality control in one place.</p>
+    <h1>GovScout</h1>
+    <p>Review possible firms for MISE. Check why each one may be worth a conversation, then approve or reject it.</p>
   </header>
   <main>
-    <section class="banner" aria-label="Daily draft limit">
-      <strong>{{ counter }}</strong>
+    <section class="banner" aria-label="Drafts available today">
+      <strong>Drafts today: {{ decision.today_count }} of {{ decision.effective_hard_limit }}</strong>
+      <p>{{ decision.remaining }} still available today.</p>
       {% for message in decision.messages %}<p>{{ message }}</p>{% endfor %}
     </section>
     {% if drafting_locked %}
     <section class="locked" role="status">
-      <strong>Production drafting locked: LINT_NOT_READY</strong>
-      <p>Review decisions are available. Gmail drafting remains unavailable until the complete copy-policy gates exist.</p>
+      <strong>Email drafting is off for now</strong>
+      <p>You can still review and approve firms. GovScout will not create Gmail drafts until the writing checks are ready.</p>
+      <p class="meta">System status: LINT_NOT_READY</p>
     </section>
     {% endif %}
 
     <section class="worklist" aria-labelledby="fca-title">
-      <h2 id="fca-title">FCA firms</h2>
-      <p>Discovery records are not outreach-ready by default. Approval requires a current passing QC run; sending remains manual.</p>
+      <h2 id="fca-title">Firms to review</h2>
+      <p>GovScout checks each firm before it can be approved. You stay in control of every decision.</p>
       {% if fca_firms %}
         {% for firm in fca_firms %}
         <article class="firm">
           <div class="firm-head">
             <div>
               <h3>{{ firm.firm_name }}</h3>
-              <div class="meta">FRN {{ firm.frn }} · {{ firm.fca_status }} · {{ firm.source_location or "Location unknown" }}</div>
+              <div class="meta">FCA reference {{ firm.frn }} · {{ firm.fca_status }} · {{ firm.source_location or "Location not found" }}</div>
               <div class="meta">
-                <a href="{{ firm.source_url }}" target="_blank" rel="noopener noreferrer">FCA source</a>
+                <a href="{{ firm.source_url }}" target="_blank" rel="noopener noreferrer">View FCA record</a>
                 {% if firm.website_url %} · <a href="{{ firm.website_url }}" target="_blank" rel="noopener noreferrer">Website</a>{% endif %}
-                {% if firm.company_number %} · Companies House {{ firm.company_number }}{% else %} · Companies House not yet resolved{% endif %}
+                {% if firm.company_number %} · Company number {{ firm.company_number }}{% else %} · Company match not available{% endif %}
               </div>
             </div>
             <div class="score {{ firm.temperature or 'COOL' }}">
               <strong>{{ firm.score if firm.score is not none else "—" }}</strong>
-              {{ firm.temperature or "UNSCORED" }}
+              {% if firm.temperature == "HOT" %}High priority
+              {% elif firm.temperature == "WARM" %}Medium priority
+              {% elif firm.temperature == "COOL" %}Lower priority
+              {% else %}Not scored yet{% endif %}
             </div>
           </div>
-          <p><strong>QC:</strong> {{ firm.qc_state or "not run" }}{% if firm.qc_reasons and firm.qc_reasons != '[]' %} — {{ firm.qc_reasons }}{% endif %} · <strong>Review:</strong> {{ firm.review_decision or "pending" }}</p>
+          <p>
+            <strong>Checks:</strong>
+            {% if firm.qc_current %}Passed
+            {% elif firm.qc_state == "pass" %}Needs a fresh check
+            {% elif firm.qc_state %}Needs attention
+            {% else %}Not checked yet{% endif %}
+            · <strong>Your decision:</strong>
+            {% if firm.review_decision == "approved" %}Approved
+            {% elif firm.review_decision == "rejected" %}Rejected
+            {% else %}Waiting{% endif %}
+          </p>
+          {% if firm.qc_reasons and firm.qc_reasons != '[]' %}
+          <details><summary>Why the checks need attention</summary><p>{{ firm.qc_reasons }}</p></details>
+          {% endif %}
           {% if firm.evidence %}
           <ul class="evidence">
             {% for item in firm.evidence %}
             <li>
-              <span class="code">{{ item.code }}</span><span class="state">{{ item.evidence_state }}</span>
+              <strong>{% if item.signal_group == "ai_exposure" %}AI exposure{% else %}{{ item.signal_group|replace('_', ' ')|capitalize }}{% endif %}</strong>
+              <span class="state">{% if item.evidence_state == "present" %}Found{% elif item.evidence_state == "absent" %}Not found{% else %}Could not confirm{% endif %}</span>
               {% if item.excerpt %}<div>{{ item.excerpt }}</div>{% endif %}
-              {% if item.source_url %}<a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">Evidence source</a>{% endif %}
+              {% if item.source_url %}<a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">View source</a>{% endif %}
             </li>
             {% endfor %}
           </ul>
-          {% else %}<p>No enrichment evidence yet.</p>{% endif %}
+          {% else %}<p>No website evidence has been gathered yet.</p>{% endif %}
           <form class="review" action="/today/review/{{ firm.id }}" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="qc_run_id" value="{{ firm.qc_run_id or '' }}">
-            <label class="wide">Notes<textarea name="notes" rows="2">{{ firm.review_notes or '' }}</textarea></label>
-            <button class="approve" type="submit" name="decision" value="approved" {% if firm.qc_state != 'pass' %}disabled title="Passing current QC required"{% endif %}>Approve</button>
+            <label class="wide">Your notes<textarea name="notes" rows="2">{{ firm.review_notes or '' }}</textarea></label>
+            <button class="approve" type="submit" name="decision" value="approved" {% if not firm.qc_current %}disabled aria-describedby="approval-help-{{ firm.id }}"{% endif %}>Approve</button>
+            {% if not firm.qc_current %}<p id="approval-help-{{ firm.id }}">The checks must be current before approval.</p>{% endif %}
             <div>
-              <input name="rejection_reason" placeholder="Rejection reason">
+              <label>Reason for rejecting<input name="rejection_reason"></label>
               <button class="reject" type="submit" name="decision" value="rejected">Reject</button>
             </div>
           </form>
         </article>
         {% endfor %}
       {% else %}
-        <p>No FCA firms have been ingested. Fixture records are never shown as live prospects.</p>
+        <p>No firms are ready to review yet.</p>
       {% endif %}
     </section>
 
     <section class="worklist" aria-labelledby="worklist-title">
-      <h2 id="worklist-title">Manual draft worklist</h2>
+      <h2 id="worklist-title">Email drafts</h2>
       {% if due_candidates %}
         {% if not drafting_locked %}
         <form action="/today/drafts" method="post">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="approve" type="submit">Create reviewed Gmail drafts within today’s limit</button>
+          <button class="approve" type="submit">Create Gmail drafts for review</button>
         </form>
         {% endif %}
         <ol>
         {% for candidate in due_candidates %}
-          <li class="firm"><strong>Lead {{ candidate.lead_id }}</strong> — stage {{ candidate.stage }}</li>
+          <li class="firm"><strong>Firm {{ candidate.lead_id }}</strong> · Follow-up step {{ candidate.stage }}</li>
         {% endfor %}
         </ol>
-      {% else %}<p>No qualified leads are due. No Gmail action is available.</p>{% endif %}
+      {% else %}<p>No firms are ready for an email draft.</p>{% endif %}
     </section>
   </main>
 </body>

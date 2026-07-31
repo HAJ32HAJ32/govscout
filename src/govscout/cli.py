@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime
 import os
-from pathlib import Path
 import sqlite3
-from typing import Protocol, Sequence
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Protocol
 
+from govscout.auth import create_collector_device, revoke_collector_device
 from govscout.config import Settings, load_default_settings, load_settings
 from govscout.db import connect_database, migrate
 from govscout.draft_service import (
@@ -32,7 +34,6 @@ from govscout.sendguard import (
     SendLimitExceeded,
 )
 from govscout.web_hosts import canonical_safe_bind_host
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -84,6 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
         "qc-fca", help="run fail-closed quality checks for one FCA firm"
     )
     qc_fca.add_argument("firm_id", type=int)
+    collector_add = subparsers.add_parser(
+        "collector-device-add", help="create a scoped collector upload credential"
+    )
+    collector_add.add_argument("--name", required=True)
+    collector_revoke = subparsers.add_parser(
+        "collector-device-revoke", help="revoke a collector upload credential"
+    )
+    collector_revoke.add_argument("device_id")
     retire_lca = subparsers.add_parser(
         "retire-lca", help="retire legacy LCA candidates after a verified backup"
     )
@@ -165,6 +174,36 @@ def main(
         )
         return 0
     current_time = now or datetime.now(UTC)
+
+    if args.command in {"collector-device-add", "collector-device-revoke"}:
+        if conn is None:
+            conn = connect_database(_default_database_path())
+            migrate(conn)
+        if args.command == "collector-device-add":
+            try:
+                credential = create_collector_device(
+                    conn,
+                    display_name=args.name,
+                    now=current_time,
+                )
+            except (sqlite3.Error, ValueError) as exc:
+                print(f"Collector device creation failed: {exc}")
+                return 2
+            print(f"Collector device created: {credential.device_id}")
+            print(f"Device token: {credential.token}")
+            print("This token is shown once; store it in the collector's secure setup screen.")
+            return 0
+        try:
+            revoke_collector_device(
+                conn,
+                device_id=args.device_id,
+                now=current_time,
+            )
+        except (KeyError, sqlite3.Error, ValueError) as exc:
+            print(f"Collector device revocation failed: {exc}")
+            return 2
+        print(f"Collector device revoked: {args.device_id}")
+        return 0
 
     if args.command == "retire-lca":
         if conn is None:
