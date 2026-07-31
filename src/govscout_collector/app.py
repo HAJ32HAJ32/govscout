@@ -122,9 +122,10 @@ class CollectorDesktop:
             controls, text="Collect and upload", command=self._start_collect
         )
         self._collect_button.grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(controls, text="Retry pending uploads", command=self._start_retry).grid(
-            row=0, column=1
+        self._retry_button = ttk.Button(
+            controls, text="Retry pending uploads", command=self._start_retry
         )
+        self._retry_button.grid(row=0, column=1)
         ttk.Label(frame, textvariable=self._status, wraplength=520).grid(
             row=8, column=0, columnspan=2, sticky="w", pady=(14, 0)
         )
