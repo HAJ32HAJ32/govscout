@@ -96,7 +96,7 @@ class CollectorDesktop:
         self._email = tk.StringVar()
         self._api_key = tk.StringVar()
         self._upload_token = tk.StringVar()
-        self._search_terms = tk.StringVar(value="finance, wealth, mortgage")
+        self._search_terms = tk.StringVar(value="")
         self._limit = tk.IntVar(value=25)
         self._status = tk.StringVar(value="Enter your setup details, then collect your first batch.")
 
@@ -104,7 +104,7 @@ class CollectorDesktop:
             ("FCA registered email", self._email, None),
             ("FCA API key", self._api_key, "•"),
             ("GovScout upload token", self._upload_token, "•"),
-            ("Search terms (comma-separated)", self._search_terms, None),
+            ("Search terms (comma-separated, e.g. a firm name — avoid broad words)", self._search_terms, None),
         )
         for row, (label, variable, mask) in enumerate(fields, start=2):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)

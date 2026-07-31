@@ -103,6 +103,11 @@ class FcaRegisterClient:
             raise FcaApiError("The FCA API response was not an object")
         api_status = decoded.get("Status")
         api_message = decoded.get("Message")
+        if api_status == "413":
+            raise FcaApiError(
+                "That search term matched too many firms for the FCA Register to return. "
+                "Use a narrower or more specific search term."
+            )
         if (
             not isinstance(api_status, str)
             or _SUCCESS_STATUS.fullmatch(api_status) is None
