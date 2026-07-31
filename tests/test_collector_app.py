@@ -77,3 +77,24 @@ def test_default_queue_path_uses_native_private_application_data_locations(tmp_p
         home=tmp_path,
         local_appdata=None,
     ) == tmp_path / "Library" / "Application Support" / "GovScout Collector" / "collector.sqlite3"
+
+
+def test_desktop_busy_state_disables_collect_and_retry_controls():
+    class Button:
+        def __init__(self):
+            self.states = []
+
+        def state(self, value):
+            self.states.append(value)
+
+    desktop = object.__new__(
+        __import__("govscout_collector.app", fromlist=["CollectorDesktop"]).CollectorDesktop
+    )
+    desktop._collect_button = Button()
+    desktop._retry_button = Button()
+
+    desktop._set_busy(True)
+    desktop._set_busy(False)
+
+    assert desktop._collect_button.states == [["disabled"], ["!disabled"]]
+    assert desktop._retry_button.states == [["disabled"], ["!disabled"]]

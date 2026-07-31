@@ -61,6 +61,18 @@ def test_collector_release_workflow_builds_windows_and_both_macos_architectures(
     assert "src/govscout_collector/__main__.py" in workflow
 
 
+def test_collector_release_builds_have_read_only_repository_credentials():
+    workflow = (ROOT / ".github/workflows/collector-release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "permissions:\n  contents: read" in workflow
+    assert workflow.count("persist-credentials: false") == 2
+    assert "publish-release:" in workflow
+    assert "needs: [windows, macos]" in workflow
+    assert "permissions:\n      contents: write" in workflow
+
+
 def test_collector_module_has_a_real_launcher():
     launcher = (ROOT / "src/govscout_collector/__main__.py").read_text(encoding="utf-8")
 

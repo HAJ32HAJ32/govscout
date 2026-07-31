@@ -178,3 +178,56 @@ def test_fca_client_fails_closed_on_api_error_status_or_missing_returned_frn(det
             email="operator@example.test",
             api_key="secret-api-key",
         )
+
+
+def test_fca_client_searches_beyond_four_inactive_candidates_for_one_active_firm():
+    inactive_frns = tuple(f"{number:06d}" for number in range(100000, 100004))
+    active_frn = "100004"
+
+    class Opener:
+        def open(self, request, timeout):
+            path = urlsplit(request.full_url).path
+            if path.endswith("/Search"):
+                return JsonResponse(
+                    {
+                        "Status": "FSR-API-04-01-00",
+                        "Message": "Ok. Search successful",
+                        "Data": [
+                            {"Reference Number": frn}
+                            for frn in (*inactive_frns, active_frn)
+                        ],
+                    }
+                )
+            frn = path.split("/")[-1]
+            if path.endswith("/Address"):
+                return JsonResponse(
+                    {
+                        "Status": "FSR-API-02-02-00",
+                        "Message": "Ok. Address found",
+                        "Data": [],
+                    }
+                )
+            return JsonResponse(
+                {
+                    "Status": "FSR-API-02-01-00",
+                    "Message": "Ok. Firm found",
+                    "Data": [
+                        {
+                            "FRN": frn,
+                            "Organisation Name": f"Firm {frn}",
+                            "Status": "Registered" if frn == active_frn else "Cancelled",
+                        }
+                    ],
+                }
+            )
+
+    payload = FcaRegisterClient(
+        opener=Opener(), sleeper=lambda _seconds: None
+    ).collect(
+        search_terms=("finance",),
+        limit=1,
+        email="operator@example.test",
+        api_key="secret-api-key",
+    )
+
+    assert [record.frn for record in parse_fca_json(payload)] == [active_frn]
