@@ -162,6 +162,7 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         "collector_devices",
         "collector_imports",
         "company_verification_attempts",
+        "fca_processing_jobs",
         "retirement_events",
         "leads",
         "sends",
@@ -180,6 +181,7 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         ("008", 64),
         ("009", 64),
         ("010", 64),
+        ("011", 64),
     ]
 
 

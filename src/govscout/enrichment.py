@@ -21,6 +21,7 @@ from govscout.quality import company_verification_is_current
 SITE_MAX_RESPONSE_BYTES = 512_000
 SITE_TIMEOUT_SECONDS = 15
 SITE_USER_AGENT = "GovScout/0.1 (+https://www.misegroup.co.uk/)"
+SITE_MAX_REDIRECTS = 3
 _FCA_IDENTITY_FIELDS = (
     "frn", "firm_name", "fca_status", "firm_type", "is_active", "source_url",
     "website_url", "source_location", "company_number", "lead_id", "source_record_hash",
@@ -30,6 +31,11 @@ _FCA_IDENTITY_FIELDS = (
 
 class SiteFetchError(ValueError):
     """A site could not be safely treated as enrichment evidence."""
+
+    def __init__(self, code: str, *, final_url: str | None = None):
+        super().__init__(code)
+        self.code = code
+        self.final_url = final_url
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +137,7 @@ def _default_open(
 
 
 class UrlSiteTransport:
-    """HTTPS-only, public-address, no-redirect, bounded website transport."""
+    """HTTPS-only, public-address, safely redirected, bounded site transport."""
 
     def __init__(
         self,
@@ -145,6 +151,7 @@ class UrlSiteTransport:
         self._clock = now_provider or (lambda: datetime.now(UTC))
 
     def fetch_html(self, url: str) -> SitePage:
+        original_url = url
         try:
             canonical_url = canonicalize_website_url(url)
         except FcaDataError as exc:
@@ -161,69 +168,99 @@ class UrlSiteTransport:
             and not parsed.fragment
         ):
             raise SiteFetchError("UNSAFE_URL")
-        try:
-            addresses = self._resolver(parsed.hostname, 443, type=socket.SOCK_STREAM)
-        except OSError as exc:
-            raise SiteFetchError("DNS_FAILED") from exc
-        if not addresses:
-            raise SiteFetchError("DNS_FAILED")
-        for address in addresses:
-            if not ipaddress.ip_address(address[4][0]).is_global:
-                raise SiteFetchError("NON_PUBLIC_ADDRESS")
-        request = Request(
-            url,
-            headers={
-                "Accept": "text/html,application/xhtml+xml",
-                "Host": parsed.hostname,
-                "User-Agent": SITE_USER_AGENT,
-            },
-        )
-        try:
-            with self._opener(
-                request,
-                timeout=SITE_TIMEOUT_SECONDS,
-                pinned_ip=addresses[0][4][0],
-                server_hostname=parsed.hostname,
-            ) as response:
-                status = getattr(response, "status", 200)
-                if 300 <= status < 400:
-                    raise SiteFetchError("REDIRECTED")
-                if status == 404:
-                    raise SiteFetchError("NOT_FOUND")
-                if not 200 <= status < 300:
-                    raise SiteFetchError("FETCH_FAILED")
-                if response.geturl() != url:
-                    raise SiteFetchError("REDIRECTED")
-                if response.headers.get_content_type() not in {
-                    "text/html",
-                    "application/xhtml+xml",
-                }:
-                    raise SiteFetchError("UNSUPPORTED_CONTENT_TYPE")
-                declared = response.headers.get("Content-Length")
-                if declared is not None:
-                    try:
-                        declared_size = int(declared)
-                    except ValueError as exc:
-                        raise SiteFetchError("INVALID_CONTENT_LENGTH") from exc
-                    if not 0 <= declared_size <= SITE_MAX_RESPONSE_BYTES:
-                        raise SiteFetchError("RESPONSE_TOO_LARGE")
-                payload = response.read(SITE_MAX_RESPONSE_BYTES + 1)
-                charset = response.headers.get_content_charset() or "utf-8"
-        except SiteFetchError:
-            raise
-        except HTTPError as exc:
-            if exc.code == 404:
-                raise SiteFetchError("NOT_FOUND") from exc
-            raise SiteFetchError("FETCH_FAILED") from exc
-        except OSError as exc:
-            raise SiteFetchError("FETCH_FAILED") from exc
+        origin = (parsed.scheme, parsed.hostname, parsed.port)
+        for redirect_count in range(SITE_MAX_REDIRECTS + 1):
+            parsed = urlsplit(url)
+            if (parsed.scheme, parsed.hostname, parsed.port) != origin:
+                raise SiteFetchError("REDIRECTED")
+            try:
+                addresses = self._resolver(parsed.hostname, 443, type=socket.SOCK_STREAM)
+            except OSError as exc:
+                raise SiteFetchError("DNS_FAILED") from exc
+            if not addresses:
+                raise SiteFetchError("DNS_FAILED")
+            for address in addresses:
+                if not ipaddress.ip_address(address[4][0]).is_global:
+                    raise SiteFetchError("NON_PUBLIC_ADDRESS")
+            request = Request(
+                url,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Host": parsed.hostname,
+                    "User-Agent": SITE_USER_AGENT,
+                },
+            )
+            try:
+                with self._opener(
+                    request,
+                    timeout=SITE_TIMEOUT_SECONDS,
+                    pinned_ip=addresses[0][4][0],
+                    server_hostname=parsed.hostname,
+                ) as response:
+                    status = getattr(response, "status", 200)
+                    if 300 <= status < 400:
+                        if redirect_count == SITE_MAX_REDIRECTS:
+                            raise SiteFetchError("REDIRECTED")
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise SiteFetchError("REDIRECTED")
+                        redirected_url = urljoin(url, location)
+                        try:
+                            redirected_canonical = canonicalize_website_url(redirected_url)
+                        except FcaDataError as exc:
+                            raise SiteFetchError("REDIRECTED") from exc
+                        redirected = urlsplit(redirected_url)
+                        if (
+                            redirected_canonical != redirected_url
+                            or (redirected.scheme, redirected.hostname, redirected.port) != origin
+                        ):
+                            raise SiteFetchError("REDIRECTED")
+                        url = redirected_url
+                        continue
+                    if status == 404:
+                        raise SiteFetchError("NOT_FOUND", final_url=url)
+                    if not 200 <= status < 300:
+                        raise SiteFetchError("FETCH_FAILED")
+                    if response.geturl() != url:
+                        raise SiteFetchError("REDIRECTED")
+                    if response.headers.get_content_type() not in {
+                        "text/html",
+                        "application/xhtml+xml",
+                    }:
+                        raise SiteFetchError("UNSUPPORTED_CONTENT_TYPE")
+                    declared = response.headers.get("Content-Length")
+                    if declared is not None:
+                        try:
+                            declared_size = int(declared)
+                        except ValueError as exc:
+                            raise SiteFetchError("INVALID_CONTENT_LENGTH") from exc
+                        if not 0 <= declared_size <= SITE_MAX_RESPONSE_BYTES:
+                            raise SiteFetchError("RESPONSE_TOO_LARGE")
+                    payload = response.read(SITE_MAX_RESPONSE_BYTES + 1)
+                    charset = response.headers.get_content_charset() or "utf-8"
+                    break
+            except SiteFetchError:
+                raise
+            except HTTPError as exc:
+                if exc.code == 404:
+                    raise SiteFetchError("NOT_FOUND", final_url=url) from exc
+                raise SiteFetchError("FETCH_FAILED") from exc
+            except OSError as exc:
+                raise SiteFetchError("FETCH_FAILED") from exc
+            if 200 <= status < 300:
+                break
         if len(payload) > SITE_MAX_RESPONSE_BYTES:
             raise SiteFetchError("RESPONSE_TOO_LARGE")
         try:
             html = payload.decode(charset)
         except (LookupError, UnicodeDecodeError) as exc:
             raise SiteFetchError("UNDECODABLE_CONTENT") from exc
-        return SitePage(url=url, final_url=url, html=html, fetched_at=self._clock())
+        return SitePage(
+            url=original_url,
+            final_url=url,
+            html=html,
+            fetched_at=self._clock(),
+        )
 
 
 class _TextExtractor(HTMLParser):
@@ -252,6 +289,63 @@ def _plain_text(html: str) -> str:
     return " ".join(" ".join(parser.parts).split())
 
 
+class _LinkExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[tuple[str, str]] = []
+        self._href: str | None = None
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a":
+            self._href = next((value for name, value in attrs if name == "href"), None)
+            self._parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._href is not None:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._href is not None:
+            self.links.append((self._href, " ".join(self._parts)))
+            self._href = None
+            self._parts = []
+
+
+def _discover_evidence_links(html: str, *, base_url: str) -> dict[str, str]:
+    parser = _LinkExtractor()
+    parser.feed(html)
+    parser.close()
+    base = urlsplit(base_url)
+    keywords = {
+        "privacy": ("privacy", "data protection"),
+        "careers": ("career", "jobs", "vacancies", "join us"),
+        "policy": ("ai policy", "responsible ai", "ai governance", "artificial intelligence"),
+    }
+    discovered: dict[str, str] = {}
+    for href, label in parser.links:
+        candidate = urljoin(base_url, href)
+        haystack = f"{href} {label}".casefold()
+        key = next(
+            (name for name, terms in keywords.items() if any(term in haystack for term in terms)),
+            None,
+        )
+        if key is None or key in discovered:
+            continue
+        try:
+            canonical = canonicalize_website_url(candidate)
+        except FcaDataError:
+            continue
+        parsed = urlsplit(candidate)
+        if canonical == candidate and (
+            parsed.scheme,
+            parsed.hostname,
+            parsed.port,
+        ) == (base.scheme, base.hostname, base.port):
+            discovered[key] = candidate
+    return discovered
+
+
 def _excerpt(text: str, keywords: tuple[str, ...]) -> str | None:
     lowered = text.casefold()
     positions = [lowered.find(word) for word in keywords if lowered.find(word) >= 0]
@@ -263,6 +357,27 @@ def _excerpt(text: str, keywords: tuple[str, ...]) -> str | None:
 
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _same_origin_canonical_url(candidate_url: str, *, requested_url: str) -> bool:
+    try:
+        canonical = canonicalize_website_url(candidate_url)
+    except FcaDataError:
+        return False
+    requested = urlsplit(requested_url)
+    candidate = urlsplit(candidate_url)
+    return canonical == candidate_url and (
+        requested.scheme,
+        requested.hostname,
+        requested.port,
+    ) == (candidate.scheme, candidate.hostname, candidate.port)
+
+
+def _page_result_is_safe(page: SitePage, *, requested_url: str) -> bool:
+    return page.url == requested_url and _same_origin_canonical_url(
+        page.final_url,
+        requested_url=requested_url,
+    )
 
 
 def _assert_firm_snapshot_current(
@@ -298,27 +413,65 @@ def run_enrichment(
         raise SiteFetchError("WEBSITE_MISSING")
     parsed = urlsplit(website)
     origin = f"https://{parsed.netloc}/"
-    targets = {
-        "home": website,
-        "privacy": urljoin(origin, "privacy"),
-        "careers": urljoin(origin, "careers"),
-        "policy": urljoin(origin, "ai-policy"),
-    }
     pages: dict[str, SitePage] = {}
     failures: dict[str, str] = {}
+    failure_urls: dict[str, str] = {}
+    try:
+        home = transport.fetch_html(website)
+    except SiteFetchError as exc:
+        failures["home"] = str(exc)
+        failure_urls["home"] = (
+            exc.final_url
+            if exc.final_url
+            and _same_origin_canonical_url(exc.final_url, requested_url=website)
+            else website
+        )
+    else:
+        if not _page_result_is_safe(home, requested_url=website):
+            failures["home"] = "REDIRECTED"
+        elif home.fetched_at.tzinfo is None or home.fetched_at.utcoffset() is None:
+            failures["home"] = "INVALID_TIMESTAMP"
+        else:
+            pages["home"] = home
+    discovered = (
+        _discover_evidence_links(
+            pages["home"].html,
+            base_url=pages["home"].final_url,
+        )
+        if "home" in pages
+        else {}
+    )
+    targets = {
+        "home": website,
+        "privacy": discovered.get("privacy", urljoin(origin, "privacy")),
+        "careers": discovered.get("careers", urljoin(origin, "careers")),
+        "policy": discovered.get("policy", urljoin(origin, "ai-policy")),
+    }
     for key, url in targets.items():
+        if key == "home":
+            continue
         try:
             page = transport.fetch_html(url)
         except SiteFetchError as exc:
             failures[key] = str(exc)
+            failure_urls[key] = (
+                exc.final_url
+                if exc.final_url
+                and _same_origin_canonical_url(exc.final_url, requested_url=url)
+                else url
+            )
             continue
-        if page.url != url or page.final_url != url:
+        if not _page_result_is_safe(page, requested_url=url):
             failures[key] = "REDIRECTED"
             continue
         if page.fetched_at.tzinfo is None or page.fetched_at.utcoffset() is None:
             failures[key] = "INVALID_TIMESTAMP"
             continue
-        pages[key] = page
+        if page.final_url != pages["home"].final_url:
+            pages[key] = page
+            continue
+        failures[key] = "REDIRECTED"
+        failure_urls[key] = page.final_url
     timestamp = now.astimezone(UTC).isoformat()
     if "home" not in pages:
         failure = failures.get("home", "FETCH_FAILED")
@@ -356,20 +509,33 @@ def run_enrichment(
     for key in ("privacy", "careers", "policy"):
         if key in failures:
             failure = failures[key]
+            if failure == "NOT_FOUND":
+                evidence.append(
+                    _Evidence(
+                        "site_health",
+                        f"{key.upper()}_URL_NOT_FOUND",
+                        "present",
+                        0,
+                        failure_urls.get(key, targets[key]),
+                        "Requested URL returned NOT_FOUND",
+                        _hash(f"{key}:NOT_FOUND"),
+                    )
+                )
+                continue
             evidence.append(
                 _Evidence(
                     "site_health",
                     f"{key.upper()}_SCAN_STATUS",
                     "unknown",
                     0,
-                    targets[key],
+                    failure_urls.get(key, targets[key]),
                     None,
                     _hash(f"{key}:{failure}"),
                 )
             )
     ai_keywords = ("ai-powered", "artificial intelligence", "chatgpt", "copilot", "chatbot")
     ai_sources = [
-        (pages[key].url, excerpt)
+        (pages[key].final_url, excerpt)
         for key, text in texts.items()
         if (excerpt := _excerpt(text, ai_keywords)) is not None
     ]
@@ -383,25 +549,25 @@ def run_enrichment(
     privacy_text = texts.get("privacy")
     privacy_silent = False
     if privacy_text is None:
-        evidence.append(_Evidence("governance_gap", "PRIVACY_AI_STATUS", "unknown", 0, targets["privacy"], None, _hash(failures.get("privacy", "unknown"))))
+        if failures.get("privacy") != "NOT_FOUND":
+            evidence.append(_Evidence("governance_gap", "PRIVACY_AI_STATUS", "unknown", 0, failure_urls.get("privacy", targets["privacy"]), None, _hash(failures.get("privacy", "unknown"))))
     else:
         privacy_terms = ("automated decision", "artificial intelligence", " ai ")
         privacy_silent = not any(term in f" {privacy_text.casefold()} " for term in privacy_terms)
         if privacy_silent:
             excerpt = (privacy_text or "Privacy page contains no readable text")[:300]
-            evidence.append(_Evidence("governance_gap", "PRIVACY_SILENT_ON_AI", "present", 15, pages["privacy"].url, excerpt, _hash(privacy_text)))
+            evidence.append(_Evidence("governance_gap", "PRIVACY_SILENT_ON_AI", "present", 15, pages["privacy"].final_url, excerpt, _hash(privacy_text)))
         else:
-            evidence.append(_Evidence("governance_gap", "PRIVACY_SILENT_ON_AI", "absent", 0, pages["privacy"].url, None, _hash(privacy_text)))
+            evidence.append(_Evidence("governance_gap", "PRIVACY_SILENT_ON_AI", "absent", 0, pages["privacy"].final_url, None, _hash(privacy_text)))
 
-    policy_missing = "policy" not in pages and failures.get("policy") == "NOT_FOUND"
-    if policy_missing:
-        evidence.append(_Evidence("governance_gap", "AI_POLICY_NOT_FOUND", "present", 15, targets["policy"], "Page not found (NOT_FOUND)", _hash("NOT_FOUND")))
-    elif "policy" not in pages:
-        evidence.append(_Evidence("governance_gap", "AI_POLICY_STATUS", "unknown", 0, targets["policy"], None, _hash(failures.get("policy", "unknown"))))
-    else:
-        evidence.append(_Evidence("governance_gap", "AI_POLICY_NOT_FOUND", "absent", 0, pages["policy"].url, None, _hash(texts["policy"])))
+    policy_url_absent = "policy" not in pages and failures.get("policy") == "NOT_FOUND"
+    if "policy" not in pages and not policy_url_absent:
+        evidence.append(_Evidence("governance_gap", "AI_POLICY_STATUS", "unknown", 0, failure_urls.get("policy", targets["policy"]), None, _hash(failures.get("policy", "unknown"))))
+    elif "policy" in pages:
+        policy_excerpt = texts["policy"][:300] or "AI policy page returned readable HTML"
+        evidence.append(_Evidence("governance_gap", "AI_POLICY_STATUS", "present", 0, pages["policy"].final_url, policy_excerpt, _hash(texts["policy"])))
 
-    gap_score = 30 if privacy_silent and policy_missing else (15 if privacy_silent else 0)
+    gap_score = 15 if privacy_silent else 0
     score = min(100, 40 + (30 if ai_visible else 0) + gap_score)
     temperature = "HOT" if score >= 75 else "WARM" if score >= 55 else "COOL"
     page_hash = _hash("\0".join(page.html for page in pages.values()))
@@ -433,7 +599,7 @@ def run_enrichment(
                 score = ?, temperature = ?
             WHERE id = ? AND state = 'running'
             """,
-            (timestamp, website, page_hash, score, temperature, run_id),
+            (timestamp, pages["home"].final_url, page_hash, score, temperature, run_id),
         )
         conn.execute("COMMIT")
     except Exception:

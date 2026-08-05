@@ -36,6 +36,7 @@ from govscout.fca_pipeline import (
     verify_firm,
 )
 from govscout.processing import process_firm
+from govscout.processing_queue import run_pending_jobs
 from govscout.quality import run_qc
 from govscout.retirement import create_verified_backup, retire_lca_candidates
 from govscout.sendguard import (
@@ -109,6 +110,10 @@ def build_parser() -> argparse.ArgumentParser:
         "process-fca", help="verify, enrich, and quality-check one FCA firm"
     )
     process_fca.add_argument("firm_id", type=int)
+    process_queue = subparsers.add_parser(
+        "process-fca-queue", help="process bounded due FCA jobs"
+    )
+    process_queue.add_argument("--limit", type=int, default=10)
     promote_contact = subparsers.add_parser(
         "promote-fca-contact", help="attach a verified outreach contact to an FCA firm"
     )
@@ -318,6 +323,29 @@ def main(
                 f"{row['frn']} | {row['fca_status']} | {row['firm_name']} | "
                 f"{location} | {score}"
             )
+        return 0
+
+    if args.command == "process-fca-queue":
+        if conn is None:
+            conn = connect_database(_default_database_path())
+            migrate(conn)
+        try:
+            verifier = company_verifier or _default_company_verifier()
+            result = run_pending_jobs(
+                conn,
+                companies_house=verifier,
+                site_transport=site_transport or UrlSiteTransport(),
+                now=current_time,
+                limit=args.limit,
+                now_provider=(lambda: datetime.now(UTC)) if now is None else None,
+            )
+        except (sqlite3.Error, ValueError) as exc:
+            print(f"FCA queue processing failed: {exc}")
+            return 2
+        print(
+            f"FCA queue: claimed {result.claimed}; succeeded {result.succeeded}; "
+            f"failed {result.failed}; retried {result.retried}"
+        )
         return 0
 
     if args.command in {

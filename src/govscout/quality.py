@@ -5,8 +5,10 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
 
 from govscout.db import ALLOWED_LEGAL_FORMS
+from govscout.fca_discovery import FcaDataError, canonicalize_website_url
 
 FCA_MAX_AGE = timedelta(days=30)
 COMPANIES_HOUSE_MAX_AGE = timedelta(days=30)
@@ -248,7 +250,26 @@ def _evaluate_current(
             reasons.add("SCAN_STALE")
         if run["input_hash"] != firm["source_record_hash"]:
             reasons.add("SOURCE_CHANGED_SINCE_SCAN")
-        if run["website_url"] != firm["website_url"] or run["final_url"] != firm["website_url"]:
+        website_origin = urlsplit(firm["website_url"])
+        final_origin = urlsplit(run["final_url"])
+        try:
+            canonical_final = canonicalize_website_url(run["final_url"])
+        except FcaDataError:
+            canonical_final = None
+        if (
+            run["website_url"] != firm["website_url"]
+            or canonical_final != run["final_url"]
+            or (
+                website_origin.scheme,
+                website_origin.hostname,
+                website_origin.port,
+            )
+            != (
+                final_origin.scheme,
+                final_origin.hostname,
+                final_origin.port,
+            )
+        ):
             reasons.add("WEBSITE_CHANGED_SINCE_SCAN")
         groups = {item["signal_group"] for item in evidence}
         if not {"accountability", "ai_exposure", "governance_gap"} <= groups:
