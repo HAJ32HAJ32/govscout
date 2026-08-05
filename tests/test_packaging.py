@@ -22,7 +22,8 @@ def test_today_template_is_available_as_a_package_resource():
     )
 
     assert "GovScout — Review firms" in template
-    assert "System status: LINT_NOT_READY" in template
+    assert "Needs research" in template
+    assert "Email drafts" not in template
 
 
 def test_retired_lca_harvester_is_not_an_importable_product_module():
