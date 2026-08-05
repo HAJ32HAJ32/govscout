@@ -107,6 +107,39 @@
             {% endfor %}
           </ul>
           {% else %}<p>No website evidence has been gathered yet.</p>{% endif %}
+          {% if firm.website_evidence_action == "assert" %}
+          <p><strong>Researched official website:</strong>
+            <a href="{{ firm.researched_website_url }}" target="_blank" rel="noopener noreferrer">{{ firm.researched_website_url }}</a>
+            · <a href="{{ firm.website_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
+          </p>
+          <p><strong>Reprocessing:</strong> {{ firm.reprocessing_state or "Not requested" }}{% if firm.reprocessing_outcome %} · {{ firm.reprocessing_outcome }}{% endif %}</p>
+          {% endif %}
+          <form class="review" action="/today/research/{{ firm.id }}/website" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id or '' }}">
+            <input type="hidden" name="action" value="assert">
+            <label>Official website URL<input name="website_url" type="url" required maxlength="2048" value="{{ firm.researched_website_url if firm.website_evidence_action == 'assert' else '' }}"></label>
+            <label>Evidence/source URL<input name="evidence_url" type="url" required maxlength="2048" value="{{ firm.website_evidence_url if firm.website_evidence_action == 'assert' else '' }}"></label>
+            <label class="wide">Why this proves it is the official website<textarea name="justification" rows="2" required maxlength="1000">{{ firm.website_justification if firm.website_evidence_action == 'assert' else '' }}</textarea></label>
+            <button class="approve" type="submit">Record website evidence</button>
+          </form>
+          {% if firm.website_evidence_action == "assert" %}
+          <form class="review" action="/today/research/{{ firm.id }}/website/reprocess" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="website_evidence_event_id" value="{{ firm.website_evidence_event_id }}">
+            <label class="wide">Why reprocess now?<input name="request_reason" required maxlength="500"></label>
+            <button class="approve" type="submit">Request reprocessing</button>
+          </form>
+          <form class="review" action="/today/research/{{ firm.id }}/website" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id }}">
+            <input type="hidden" name="action" value="withdraw">
+            <input type="hidden" name="website_url" value="{{ firm.researched_website_url }}">
+            <input type="hidden" name="evidence_url" value="{{ firm.website_evidence_url }}">
+            <label class="wide">Why withdraw this website evidence?<input name="justification" required maxlength="1000"></label>
+            <button class="reject" type="submit">Withdraw website evidence</button>
+          </form>
+          {% endif %}
           <form class="review" action="/today/research/{{ firm.id }}/archive" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="expected_archive_event_id" value="{{ firm.archive_event_id or '' }}">

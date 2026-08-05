@@ -44,6 +44,11 @@ from govscout.fca_discovery import (
 )
 from govscout.quality import qc_is_current, review_firm
 from govscout.research import ResearchConflict, record_archive_event
+from govscout.website_research import (
+    WebsiteResearchConflict,
+    enqueue_website_reprocessing,
+    record_website_evidence,
+)
 from govscout.sendguard import (
     ReservationConflict,
     ReservationRequest,
@@ -379,7 +384,15 @@ def create_app(
                     r.rejection_reason,
                     t.id AS archive_event_id,
                     t.action AS archive_action,
-                    t.reason AS archive_reason
+                    t.reason AS archive_reason,
+                    w.id AS website_evidence_event_id,
+                    w.action AS website_evidence_action,
+                    w.website_url AS researched_website_url,
+                    w.evidence_url AS website_evidence_url,
+                    w.justification AS website_justification,
+                    p.id AS reprocessing_job_id,
+                    p.state AS reprocessing_state,
+                    p.outcome_code AS reprocessing_outcome
                 FROM fca_firms f
                 LEFT JOIN enrichment_runs e ON e.id = (
                     SELECT id FROM enrichment_runs
@@ -395,6 +408,14 @@ def create_app(
                 )
                 LEFT JOIN firm_archive_events t ON t.id = (
                     SELECT id FROM firm_archive_events
+                    WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
+                )
+                LEFT JOIN firm_website_evidence_events w ON w.id = (
+                    SELECT id FROM firm_website_evidence_events
+                    WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
+                )
+                LEFT JOIN fca_reprocessing_jobs p ON p.id = (
+                    SELECT id FROM fca_reprocessing_jobs
                     WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
                 )
                 ORDER BY COALESCE(e.score, -1) DESC, f.id
@@ -490,6 +511,61 @@ def create_app(
             return jsonify(error="archive_conflict", detail=str(exc)), 409
         except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
             return jsonify(error="archive_refused", detail=str(exc)), 422
+        finally:
+            conn.close()
+        return redirect(url_for("today"), code=303)
+
+    @app.post("/today/research/<int:firm_id>/website")
+    def record_researched_website(firm_id: int):
+        raw_expected = request.form.get("expected_website_evidence_event_id")
+        try:
+            expected_event_id = int(raw_expected) if raw_expected else None
+        except ValueError:
+            return jsonify(error="invalid_website_evidence_event"), 422
+        conn = conn_factory()
+        try:
+            record_website_evidence(
+                conn,
+                firm_id=firm_id,
+                action=request.form.get("action", "assert"),
+                website_url=request.form.get("website_url"),
+                evidence_url=request.form.get("evidence_url"),
+                justification=request.form.get("justification"),
+                actor=auth.username if auth is not None else "local-operator",
+                expected_previous_event_id=expected_event_id,
+                now=clock(),
+            )
+        except WebsiteResearchConflict as exc:
+            return jsonify(error="website_evidence_conflict", detail=str(exc)), 409
+        except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
+            return jsonify(error="website_evidence_refused", detail=str(exc)), 422
+        finally:
+            conn.close()
+        return redirect(url_for("today"), code=303)
+
+    @app.post("/today/research/<int:firm_id>/website/reprocess")
+    def request_website_reprocessing(firm_id: int):
+        raw_evidence = request.form.get("website_evidence_event_id")
+        try:
+            evidence_event_id = int(raw_evidence) if raw_evidence else None
+        except ValueError:
+            return jsonify(error="invalid_website_evidence_event"), 422
+        if evidence_event_id is None:
+            return jsonify(error="website_evidence_required"), 422
+        conn = conn_factory()
+        try:
+            enqueue_website_reprocessing(
+                conn,
+                firm_id=firm_id,
+                expected_website_evidence_event_id=evidence_event_id,
+                requested_by=auth.username if auth is not None else "local-operator",
+                request_reason=request.form.get("request_reason"),
+                now=clock(),
+            )
+        except WebsiteResearchConflict as exc:
+            return jsonify(error="reprocessing_conflict", detail=str(exc)), 409
+        except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
+            return jsonify(error="reprocessing_refused", detail=str(exc)), 422
         finally:
             conn.close()
         return redirect(url_for("today"), code=303)

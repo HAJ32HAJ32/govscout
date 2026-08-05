@@ -13,6 +13,10 @@ from govscout.enrichment import SiteFetchError, SiteTransport
 from govscout.fca_pipeline import CompanyVerifier, FcaEligibilityError
 from govscout.processing import process_firm
 from govscout.quality import qc_is_current, run_qc
+from govscout.website_research import (
+    WebsiteResearchConflict,
+    load_current_reprocessing_input,
+)
 
 
 MAX_JOB_ATTEMPTS = 3
@@ -44,6 +48,7 @@ _SITE_FAILURE_CODES = frozenset(
         "UNSAFE_URL",
         "UNSUPPORTED_CONTENT_TYPE",
         "WEBSITE_MISSING",
+        "WEBSITE_EVIDENCE_CHANGED",
     }
 )
 _VERIFICATION_FAILURE_CODES = frozenset(
@@ -81,6 +86,11 @@ class _ClaimedJob:
     source_record_hash: str
     attempt_count: int
     claim_token: str
+    queue_name: str = "fca_processing_jobs"
+    website_url: str | None = None
+    website_evidence_event_id: int | None = None
+    company_verification_attempt_id: int | None = None
+    input_hash: str | None = None
 
 
 def _claim_next_job(conn: sqlite3.Connection, *, now: datetime) -> _ClaimedJob | None:
@@ -89,51 +99,74 @@ def _claim_next_job(conn: sqlite3.Connection, *, now: datetime) -> _ClaimedJob |
     claim_token = secrets.token_hex(16)
     try:
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute(
-            """
-            UPDATE fca_processing_jobs
-            SET state = 'pending', claimed_at = NULL, claim_token = NULL,
-                available_at = ?,
-                outcome_code = 'WORKER_LEASE_EXPIRED', updated_at = ?
-            WHERE state = 'running' AND claimed_at <= ? AND attempt_count < ?
-            """,
-            (timestamp, timestamp, stale_before, MAX_JOB_ATTEMPTS),
-        )
-        conn.execute(
-            """
-            UPDATE fca_processing_jobs
-            SET state = 'failed', completed_at = ?, outcome_code = 'RETRY_EXHAUSTED',
-                updated_at = ?
-            WHERE state = 'running' AND claimed_at <= ? AND attempt_count >= ?
-            """,
-            (timestamp, timestamp, stale_before, MAX_JOB_ATTEMPTS),
-        )
+        for table in ("fca_processing_jobs", "fca_reprocessing_jobs"):
+            conn.execute(
+                f"""
+                UPDATE {table}
+                SET state = 'pending', claimed_at = NULL, claim_token = NULL,
+                    available_at = ?, outcome_code = 'WORKER_LEASE_EXPIRED',
+                    updated_at = ?
+                WHERE state = 'running' AND claimed_at <= ? AND attempt_count < ?
+                """,
+                (timestamp, timestamp, stale_before, MAX_JOB_ATTEMPTS),
+            )
+            conn.execute(
+                f"""
+                UPDATE {table}
+                SET state = 'failed', completed_at = ?,
+                    outcome_code = 'RETRY_EXHAUSTED', updated_at = ?
+                WHERE state = 'running' AND claimed_at <= ? AND attempt_count >= ?
+                """,
+                (timestamp, timestamp, stale_before, MAX_JOB_ATTEMPTS),
+            )
         row = conn.execute(
             """
-            SELECT id, firm_id, source_record_hash, attempt_count
-            FROM fca_processing_jobs AS job
-            WHERE state = 'pending' AND available_at <= ? AND attempt_count < ?
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM firm_archive_events AS archive
-                  WHERE archive.id = (
-                      SELECT id FROM firm_archive_events
-                      WHERE firm_id = job.firm_id
-                      ORDER BY id DESC LIMIT 1
+            SELECT * FROM (
+                SELECT 'fca_processing_jobs' AS queue_name, 0 AS queue_rank,
+                       job.id, job.firm_id, job.source_record_hash,
+                       job.attempt_count, job.available_at,
+                       NULL AS website_evidence_event_id,
+                       NULL AS company_verification_attempt_id,
+                       NULL AS input_hash
+                FROM fca_processing_jobs AS job
+                WHERE job.state = 'pending' AND job.available_at <= ?
+                  AND job.attempt_count < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM firm_archive_events AS archive
+                      WHERE archive.id = (
+                          SELECT id FROM firm_archive_events
+                          WHERE firm_id = job.firm_id ORDER BY id DESC LIMIT 1
+                      ) AND archive.action = 'archive'
                   )
-                    AND archive.action = 'archive'
-              )
-            ORDER BY available_at, id
+                UNION ALL
+                SELECT 'fca_reprocessing_jobs' AS queue_name, 1 AS queue_rank,
+                       job.id, job.firm_id, job.source_record_hash,
+                       job.attempt_count, job.available_at,
+                       job.website_evidence_event_id,
+                       job.company_verification_attempt_id, job.input_hash
+                FROM fca_reprocessing_jobs AS job
+                WHERE job.state = 'pending' AND job.available_at <= ?
+                  AND job.attempt_count < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM firm_archive_events AS archive
+                      WHERE archive.id = (
+                          SELECT id FROM firm_archive_events
+                          WHERE firm_id = job.firm_id ORDER BY id DESC LIMIT 1
+                      ) AND archive.action = 'archive'
+                  )
+            )
+            ORDER BY available_at, queue_rank, id
             LIMIT 1
             """,
-            (timestamp, MAX_JOB_ATTEMPTS),
+            (timestamp, MAX_JOB_ATTEMPTS, timestamp, MAX_JOB_ATTEMPTS),
         ).fetchone()
         if row is None:
             conn.execute("COMMIT")
             return None
+        table = row["queue_name"]
         updated = conn.execute(
-            """
-            UPDATE fca_processing_jobs
+            f"""
+            UPDATE {table}
             SET state = 'running', attempt_count = attempt_count + 1,
                 claimed_at = ?, claim_token = ?, outcome_code = NULL, updated_at = ?
             WHERE id = ? AND state = 'pending'
@@ -149,6 +182,17 @@ def _claim_next_job(conn: sqlite3.Connection, *, now: datetime) -> _ClaimedJob |
             row["source_record_hash"],
             int(row["attempt_count"]) + 1,
             claim_token,
+            table,
+            None,
+            (
+                int(row["website_evidence_event_id"])
+                if row["website_evidence_event_id"] is not None else None
+            ),
+            (
+                int(row["company_verification_attempt_id"])
+                if row["company_verification_attempt_id"] is not None else None
+            ),
+            row["input_hash"],
         )
     except Exception:
         if conn.in_transaction:
@@ -216,6 +260,13 @@ def _record_outcome(
             state = "failed"
             outcome_code = "SOURCE_CHANGED"
             available_at = None
+        if job.queue_name == "fca_reprocessing_jobs":
+            try:
+                load_current_reprocessing_input(conn, job_id=job.job_id, now=now)
+            except (KeyError, ValueError, WebsiteResearchConflict):
+                state = "failed"
+                outcome_code = "REPROCESSING_INPUT_CHANGED"
+                available_at = None
         if state == "succeeded" and outcome_code == "QC_PASS":
             latest_qc = conn.execute(
                 "SELECT id FROM qc_runs WHERE firm_id = ? ORDER BY id DESC LIMIT 1",
@@ -234,8 +285,8 @@ def _record_outcome(
             if available_at is None:
                 raise ValueError("pending processing outcome requires available_at")
             updated = conn.execute(
-                """
-                UPDATE fca_processing_jobs
+                f"""
+                UPDATE {job.queue_name}
                 SET state = 'pending', claimed_at = NULL, claim_token = NULL,
                     completed_at = NULL, outcome_code = ?, available_at = ?,
                     updated_at = ?
@@ -251,8 +302,8 @@ def _record_outcome(
             )
         else:
             updated = conn.execute(
-                """
-                UPDATE fca_processing_jobs
+                f"""
+                UPDATE {job.queue_name}
                 SET state = ?, completed_at = ?, outcome_code = ?, updated_at = ?
                 WHERE id = ? AND state = 'running' AND claim_token = ?
                 """,
@@ -340,12 +391,39 @@ def _run_pending_jobs_locked(
             )
             failed += 1
             continue
+        current_reprocessing = None
+        if job.queue_name == "fca_reprocessing_jobs":
+            try:
+                current_reprocessing = load_current_reprocessing_input(
+                    conn, job_id=job.job_id, now=job_now
+                )
+            except (KeyError, ValueError, WebsiteResearchConflict):
+                _record_outcome(
+                    conn,
+                    job=job,
+                    state="failed",
+                    outcome_code="REPROCESSING_INPUT_CHANGED",
+                    now=job_now,
+                )
+                failed += 1
+                continue
         try:
             result = process_firm(
                 conn,
                 firm_id=job.firm_id,
                 companies_house=companies_house,
                 site_transport=site_transport,
+                website_url=(
+                    current_reprocessing.website_url
+                    if current_reprocessing is not None else None
+                ),
+                website_evidence_event_id=job.website_evidence_event_id,
+                company_verification_attempt_id=job.company_verification_attempt_id,
+                processing_input_hash=job.input_hash,
+                reprocessing_job_id=(
+                    job.job_id
+                    if job.queue_name == "fca_reprocessing_jobs" else None
+                ),
                 now=job_now,
             )
         except (

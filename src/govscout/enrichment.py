@@ -12,6 +12,11 @@ import ssl
 from typing import Any, Callable, Protocol
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlsplit
+
+from govscout.website_research import (
+    WebsiteResearchConflict,
+    load_current_reprocessing_input,
+)
 from urllib.request import Request
 
 from govscout.fca_discovery import FcaDataError, canonicalize_website_url
@@ -410,11 +415,57 @@ def _assert_verification_current(
         raise SiteFetchError("COMPANIES_HOUSE_VERIFICATION_CHANGED")
 
 
+def _assert_reprocessing_current(
+    conn: sqlite3.Connection,
+    *,
+    firm_id: int,
+    website_url: str,
+    website_evidence_event_id: int | None,
+    company_verification_attempt_id: int | None,
+    processing_input_hash: str,
+    reprocessing_job_id: int | None,
+    source_record_hash: str,
+    now: datetime,
+) -> None:
+    if website_evidence_event_id is None:
+        if (
+            company_verification_attempt_id is not None
+            or reprocessing_job_id is not None
+            or processing_input_hash != source_record_hash
+        ):
+            raise SiteFetchError("WEBSITE_EVIDENCE_CHANGED")
+        return
+    if (
+        company_verification_attempt_id is None
+        or reprocessing_job_id is None
+    ):
+        raise SiteFetchError("WEBSITE_EVIDENCE_CHANGED")
+    try:
+        current = load_current_reprocessing_input(
+            conn, job_id=reprocessing_job_id, now=now
+        )
+    except (KeyError, ValueError, WebsiteResearchConflict) as exc:
+        raise SiteFetchError("WEBSITE_EVIDENCE_CHANGED") from exc
+    if (
+        current.firm_id != firm_id
+        or current.website_url != website_url
+        or current.website_evidence_event_id != website_evidence_event_id
+        or current.company_verification_attempt_id != company_verification_attempt_id
+        or current.input_hash != processing_input_hash
+    ):
+        raise SiteFetchError("WEBSITE_EVIDENCE_CHANGED")
+
+
 def run_enrichment(
     conn: sqlite3.Connection,
     *,
     firm_id: int,
     transport: SiteTransport,
+    website_url: str | None = None,
+    website_evidence_event_id: int | None = None,
+    company_verification_attempt_id: int | None = None,
+    processing_input_hash: str | None = None,
+    reprocessing_job_id: int | None = None,
     now: datetime,
 ) -> EnrichmentResult:
     if now.tzinfo is None or now.utcoffset() is None:
@@ -440,9 +491,32 @@ def run_enrichment(
     if verification is None:
         raise SiteFetchError("COMPANIES_HOUSE_VERIFICATION_REQUIRED")
     verification_attempt_id = int(verification["id"])
-    website = firm["website_url"]
+    if website_evidence_event_id is None and website_url is not None:
+        raise SiteFetchError("WEBSITE_EVIDENCE_CHANGED")
+    website = (
+        website_url
+        if website_evidence_event_id is not None
+        else firm["website_url"]
+    )
     if website is None:
         raise SiteFetchError("WEBSITE_MISSING")
+    effective_input_hash = processing_input_hash or firm["source_record_hash"]
+    if (
+        company_verification_attempt_id is not None
+        and company_verification_attempt_id != verification_attempt_id
+    ):
+        raise SiteFetchError("COMPANIES_HOUSE_VERIFICATION_CHANGED")
+    _assert_reprocessing_current(
+        conn,
+        firm_id=firm_id,
+        website_url=website,
+        website_evidence_event_id=website_evidence_event_id,
+        company_verification_attempt_id=company_verification_attempt_id,
+        processing_input_hash=effective_input_hash,
+        reprocessing_job_id=reprocessing_job_id,
+        source_record_hash=firm["source_record_hash"],
+        now=now,
+    )
     parsed = urlsplit(website)
     origin = f"https://{parsed.netloc}/"
     pages: dict[str, SitePage] = {}
@@ -520,14 +594,30 @@ def run_enrichment(
                 verification_attempt_id=verification_attempt_id,
                 now=now,
             )
+            _assert_reprocessing_current(
+                conn,
+                firm_id=firm_id,
+                website_url=website,
+                website_evidence_event_id=website_evidence_event_id,
+                company_verification_attempt_id=company_verification_attempt_id,
+                processing_input_hash=effective_input_hash,
+                reprocessing_job_id=reprocessing_job_id,
+                source_record_hash=firm["source_record_hash"],
+                now=now,
+            )
             conn.execute(
                 """
                 INSERT INTO enrichment_runs (
                     firm_id, state, started_at, completed_at, website_url,
-                    input_hash, failure_code
-                ) VALUES (?, 'failed', ?, ?, ?, ?, ?)
+                    input_hash, failure_code, website_evidence_event_id,
+                    company_verification_attempt_id
+                ) VALUES (?, 'failed', ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (firm_id, timestamp, timestamp, website, firm["source_record_hash"], failure),
+                (
+                    firm_id, timestamp, timestamp, website,
+                    effective_input_hash, failure,
+                    website_evidence_event_id, company_verification_attempt_id,
+                ),
             )
             conn.execute("COMMIT")
         except Exception:
@@ -622,13 +712,28 @@ def run_enrichment(
             verification_attempt_id=verification_attempt_id,
             now=now,
         )
+        _assert_reprocessing_current(
+            conn,
+            firm_id=firm_id,
+            website_url=website,
+            website_evidence_event_id=website_evidence_event_id,
+            company_verification_attempt_id=company_verification_attempt_id,
+            processing_input_hash=effective_input_hash,
+            reprocessing_job_id=reprocessing_job_id,
+            source_record_hash=firm["source_record_hash"],
+            now=now,
+        )
         run_id = conn.execute(
             """
             INSERT INTO enrichment_runs (
-                firm_id, state, started_at, website_url, input_hash
-            ) VALUES (?, 'running', ?, ?, ?)
+                firm_id, state, started_at, website_url, input_hash,
+                website_evidence_event_id, company_verification_attempt_id
+            ) VALUES (?, 'running', ?, ?, ?, ?, ?)
             """,
-            (firm_id, timestamp, website, firm["source_record_hash"]),
+            (
+                firm_id, timestamp, website, effective_input_hash,
+                website_evidence_event_id, company_verification_attempt_id,
+            ),
         ).lastrowid
         for item in evidence:
             conn.execute(
