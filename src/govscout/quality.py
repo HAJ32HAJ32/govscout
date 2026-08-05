@@ -410,6 +410,15 @@ def review_firm(
         raise sqlite3.OperationalError("firm review requires no active transaction")
     try:
         conn.execute("BEGIN IMMEDIATE")
+        archive = conn.execute(
+            """
+            SELECT id, action FROM firm_archive_events
+            WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (firm_id,),
+        ).fetchone()
+        if archive is not None and archive["action"] == "archive":
+            raise ValueError("archived firms cannot be reviewed")
         if decision == "approved":
             if qc_run_id is None or not qc_is_current(
                 conn, firm_id=firm_id, qc_run_id=qc_run_id, now=now
@@ -421,8 +430,9 @@ def review_firm(
         conn.execute(
             """
             INSERT INTO firm_reviews (
-                firm_id, decision, qc_run_id, notes, rejection_reason, reviewed_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                firm_id, decision, qc_run_id, notes, rejection_reason, reviewed_at,
+                archive_event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 firm_id,
@@ -431,6 +441,7 @@ def review_firm(
                 notes.strip() if notes and notes.strip() else None,
                 rejection_reason.strip() if rejection_reason else None,
                 now.astimezone(UTC).isoformat(),
+                int(archive["id"]) if archive is not None else None,
             ),
         )
         conn.execute("COMMIT")
@@ -441,6 +452,15 @@ def review_firm(
 
 
 def is_outreach_ready(conn: sqlite3.Connection, *, firm_id: int, now: datetime) -> bool:
+    archive = conn.execute(
+        """
+        SELECT id, action FROM firm_archive_events
+        WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+        """,
+        (firm_id,),
+    ).fetchone()
+    if archive is not None and archive["action"] == "archive":
+        return False
     firm = conn.execute(
         """
         SELECT f.lead_id, l.contact_email
@@ -454,7 +474,7 @@ def is_outreach_ready(conn: sqlite3.Connection, *, firm_id: int, now: datetime) 
         return False
     review = conn.execute(
         """
-        SELECT decision, qc_run_id FROM firm_reviews
+        SELECT decision, qc_run_id, archive_event_id FROM firm_reviews
         WHERE firm_id = ? ORDER BY id DESC LIMIT 1
         """,
         (firm_id,),
@@ -463,5 +483,7 @@ def is_outreach_ready(conn: sqlite3.Connection, *, firm_id: int, now: datetime) 
         review
         and review["decision"] == "approved"
         and review["qc_run_id"] is not None
+        and review["archive_event_id"]
+        == (int(archive["id"]) if archive is not None else None)
         and qc_is_current(conn, firm_id=firm_id, qc_run_id=review["qc_run_id"], now=now)
     )

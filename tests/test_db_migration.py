@@ -164,6 +164,7 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         "company_verification_attempts",
         "fca_processing_jobs",
         "fca_processing_job_events",
+        "firm_archive_events",
         "retirement_events",
         "leads",
         "sends",
@@ -184,7 +185,106 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         ("010", 64),
         ("011", 64),
         ("012", 64),
+        ("013", 64),
     ]
+
+
+def test_migration_013_upgrades_populated_review_history(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    _migrate_until(conn, "013")
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Existing Review Ltd', 'Authorised', 1, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            "a" * 64,
+            "2026-08-05T08:00:00+00:00",
+            "2026-08-05T08:00:00+00:00",
+        ),
+    ).lastrowid
+    review_id = conn.execute(
+        """
+        INSERT INTO firm_reviews (
+            firm_id, decision, qc_run_id, notes, rejection_reason, reviewed_at
+        ) VALUES (?, 'rejected', NULL, 'Existing note', 'Not suitable', ?)
+        """,
+        (firm_id, "2026-08-05T08:01:00+00:00"),
+    ).lastrowid
+
+    migrate(conn)
+
+    assert conn.execute(
+        "SELECT archive_event_id FROM firm_reviews WHERE id = ?",
+        (review_id,),
+    ).fetchone()[0] is None
+    assert conn.execute(
+        "SELECT count(*) FROM firm_archive_events"
+    ).fetchone()[0] == 0
+
+
+def test_archive_event_schema_enforces_legal_append_only_transitions(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Archive Test Ltd', 'Authorised', 1, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            "a" * 64,
+            "2026-08-05T08:00:00+00:00",
+            "2026-08-05T08:00:00+00:00",
+        ),
+    ).lastrowid
+    with pytest.raises(sqlite3.IntegrityError, match="not archived"):
+        conn.execute(
+            """
+            INSERT INTO firm_archive_events (
+                firm_id, action, reason, expected_previous_event_id, occurred_at
+            ) VALUES (?, 'restore', 'Invalid first action', NULL, ?)
+            """,
+            (firm_id, "2026-08-05T08:01:00+00:00"),
+        )
+    archive_id = conn.execute(
+        """
+        INSERT INTO firm_archive_events (
+            firm_id, action, reason, expected_previous_event_id, occurred_at
+        ) VALUES (?, 'archive', 'Outside target market', NULL, ?)
+        """,
+        (firm_id, "2026-08-05T08:02:00+00:00"),
+    ).lastrowid
+    with pytest.raises(sqlite3.IntegrityError, match="stale archive event"):
+        conn.execute(
+            """
+            INSERT INTO firm_archive_events (
+                firm_id, action, reason, expected_previous_event_id, occurred_at
+            ) VALUES (?, 'restore', 'Stale browser state', NULL, ?)
+            """,
+            (firm_id, "2026-08-05T08:03:00+00:00"),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="already archived"):
+        conn.execute(
+            """
+            INSERT INTO firm_archive_events (
+                firm_id, action, reason, expected_previous_event_id, occurred_at
+            ) VALUES (?, 'archive', 'Duplicate action', ?, ?)
+            """,
+            (firm_id, archive_id, "2026-08-05T08:03:00+00:00"),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        conn.execute(
+            "UPDATE firm_archive_events SET reason = 'Rewritten' WHERE id = ?",
+            (archive_id,),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        conn.execute("DELETE FROM firm_archive_events WHERE id = ?", (archive_id,))
 
 
 def test_company_verification_attempts_are_append_only_and_fail_closed(tmp_path):

@@ -19,6 +19,7 @@ from govscout.processing_queue import (
     _record_outcome,
     run_pending_jobs,
 )
+from govscout.research import ResearchConflict, record_archive_event
 from tests.support import StubCompaniesHouseTransport
 
 
@@ -162,6 +163,55 @@ def test_worker_processes_due_job_once_without_creating_outreach_records(tmp_pat
         conn.execute("UPDATE fca_processing_job_events SET outcome_code = 'QC_FAIL'")
     with pytest.raises(sqlite3.IntegrityError, match="cannot be deleted"):
         conn.execute("DELETE FROM fca_processing_job_events")
+
+
+def test_worker_does_not_claim_an_archived_firm(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    _queue_firm(conn)
+    firm_id = conn.execute("SELECT id FROM fca_firms").fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO firm_archive_events (
+            firm_id, action, reason, expected_previous_event_id, occurred_at
+        ) VALUES (?, 'archive', 'Outside current target market', NULL, ?)
+        """,
+        (firm_id, NOW.isoformat()),
+    )
+
+    result = run_pending_jobs(
+        conn,
+        companies_house=_companies_house(),
+        site_transport=_complete_site(),
+        now=NOW + timedelta(seconds=2),
+        limit=5,
+    )
+
+    assert (result.claimed, result.succeeded, result.failed, result.retried) == (0, 0, 0, 0)
+    job = conn.execute(
+        "SELECT state, attempt_count FROM fca_processing_jobs"
+    ).fetchone()
+    assert tuple(job) == ("pending", 0)
+
+
+def test_archive_refuses_a_firm_while_processing_is_running(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    _queue_firm(conn)
+    firm_id = conn.execute("SELECT id FROM fca_firms").fetchone()[0]
+    assert _claim_next_job(conn, now=NOW + timedelta(seconds=2)) is not None
+
+    with pytest.raises(ResearchConflict, match="processing is currently running"):
+        record_archive_event(
+            conn,
+            firm_id=firm_id,
+            action="archive",
+            reason="Outside current target market",
+            expected_previous_event_id=None,
+            now=NOW + timedelta(seconds=3),
+        )
+
+    assert conn.execute("SELECT count(*) FROM firm_archive_events").fetchone()[0] == 0
 
 
 def test_worker_records_permanent_missing_website_and_fail_closed_qc(tmp_path):
@@ -371,8 +421,27 @@ def test_migration_012_upgrades_populated_011_queue_and_accepts_worker_completio
     monkeypatch.setattr(db_module, "_migration_texts", lambda: migrations[:11])
     migrate(conn)
     _queue_firm(conn)
-    claim = _claim_next_job(conn, now=NOW + timedelta(seconds=2))
-    assert claim is not None
+    row = conn.execute(
+        "SELECT id, firm_id, source_record_hash FROM fca_processing_jobs"
+    ).fetchone()
+    claimed_at = (NOW + timedelta(seconds=2)).isoformat()
+    claim_token = "c" * 32
+    conn.execute(
+        """
+        UPDATE fca_processing_jobs
+        SET state = 'running', attempt_count = 1, claimed_at = ?,
+            claim_token = ?, outcome_code = NULL, updated_at = ?
+        WHERE id = ?
+        """,
+        (claimed_at, claim_token, claimed_at, row["id"]),
+    )
+    claim = processing_queue._ClaimedJob(
+        int(row["id"]),
+        int(row["firm_id"]),
+        row["source_record_hash"],
+        1,
+        claim_token,
+    )
 
     monkeypatch.setattr(db_module, "_migration_texts", lambda: migrations)
     migrate(conn)

@@ -571,6 +571,86 @@ def test_qc_fails_closed_then_human_approval_makes_current_good_data_ready(tmp_p
     assert is_outreach_ready(conn, firm_id=firm_id, now=NOW + timedelta(minutes=2))
 
 
+def test_archiving_invalidates_outreach_readiness_and_blocks_review(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _approve_current_firm(conn, firm_id)
+    qc_run_id = conn.execute(
+        "SELECT id FROM qc_runs WHERE firm_id = ? ORDER BY id DESC LIMIT 1",
+        (firm_id,),
+    ).fetchone()[0]
+    assert is_outreach_ready(conn, firm_id=firm_id, now=NOW)
+    conn.execute(
+        """
+        INSERT INTO firm_archive_events (
+            firm_id, action, reason, expected_previous_event_id, occurred_at
+        ) VALUES (?, 'archive', 'Outside current target market', NULL, ?)
+        """,
+        (firm_id, NOW.isoformat()),
+    )
+
+    assert not is_outreach_ready(conn, firm_id=firm_id, now=NOW)
+    with pytest.raises(ValueError, match="archived"):
+        review_firm(
+            conn,
+            firm_id=firm_id,
+            decision="approved",
+            qc_run_id=qc_run_id,
+            notes="Should not be recorded",
+            rejection_reason=None,
+            now=NOW,
+        )
+
+
+def test_restoring_does_not_revive_a_pre_archive_approval(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _approve_current_firm(conn, firm_id)
+    assert is_outreach_ready(conn, firm_id=firm_id, now=NOW)
+    archive_id = conn.execute(
+        """
+        INSERT INTO firm_archive_events (
+            firm_id, action, reason, expected_previous_event_id, occurred_at
+        ) VALUES (?, 'archive', 'Outside current target market', NULL, ?)
+        """,
+        (firm_id, NOW.isoformat()),
+    ).lastrowid
+    conn.execute(
+        """
+        INSERT INTO firm_archive_events (
+            firm_id, action, reason, expected_previous_event_id, occurred_at
+        ) VALUES (?, 'restore', 'New information received', ?, ?)
+        """,
+        (firm_id, archive_id, (NOW + timedelta(minutes=1)).isoformat()),
+    )
+
+    assert not is_outreach_ready(
+        conn,
+        firm_id=firm_id,
+        now=NOW + timedelta(minutes=1),
+    )
+    qc_run_id = conn.execute(
+        "SELECT id FROM qc_runs WHERE firm_id = ? ORDER BY id DESC LIMIT 1",
+        (firm_id,),
+    ).fetchone()[0]
+    review_firm(
+        conn,
+        firm_id=firm_id,
+        decision="approved",
+        qc_run_id=qc_run_id,
+        notes="Fresh review after restore",
+        rejection_reason=None,
+        now=NOW + timedelta(minutes=2),
+    )
+    assert is_outreach_ready(
+        conn,
+        firm_id=firm_id,
+        now=NOW + timedelta(minutes=2),
+    )
+
+
 def test_review_history_is_append_only_and_latest_decision_controls_readiness(tmp_path):
     conn = connect_database(tmp_path / "govscout.sqlite3")
     migrate(conn)
