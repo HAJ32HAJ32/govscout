@@ -107,6 +107,12 @@
             {% endfor %}
           </ul>
           {% else %}<p>No website evidence has been gathered yet.</p>{% endif %}
+          <form class="review" action="/today/research/{{ firm.id }}/archive" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="expected_archive_event_id" value="{{ firm.archive_event_id or '' }}">
+            <label class="wide">Why archive this firm?<input name="reason" required maxlength="500"></label>
+            <button class="reject" type="submit" name="action" value="archive">Archive</button>
+          </form>
         </article>
         {% endfor %}
       {% else %}<p>No firms need research.</p>{% endif %}
@@ -179,6 +185,26 @@
         <p>No firms are ready to review yet.</p>
       {% endif %}
     </section>
+
+    {% if archived_firms %}
+    <section class="worklist" aria-labelledby="archived-title">
+      <h2 id="archived-title">Archived firms</h2>
+      <p>Archived firms are excluded from processing, review approval and outreach readiness. Restoring one returns it to the appropriate research or review queue; it does not revive an old approval.</p>
+      {% for firm in archived_firms %}
+      <article class="firm">
+        <h3>{{ firm.firm_name }}</h3>
+        <div class="meta">FCA reference {{ firm.frn }} · <a href="{{ firm.fca_register_url }}" target="_blank" rel="noopener noreferrer">Find on FCA Register</a></div>
+        <p><strong>Archived because:</strong> {{ firm.archive_reason }}</p>
+        <form class="review" action="/today/research/{{ firm.id }}/archive" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_archive_event_id" value="{{ firm.archive_event_id }}">
+          <label class="wide">Why restore this firm?<input name="reason" required maxlength="500"></label>
+          <button class="approve" type="submit" name="action" value="restore">Restore</button>
+        </form>
+      </article>
+      {% endfor %}
+    </section>
+    {% endif %}
 
   </main>
 </body>
