@@ -6,6 +6,7 @@ from importlib import resources
 import os
 from pathlib import Path
 import sqlite3
+import stat
 
 from govscout.companies_house import VerifiedCompany, is_verified_company
 from govscout.email_address import normalise_single_recipient
@@ -23,13 +24,25 @@ def connect_database(path: str | Path) -> sqlite3.Connection:
         database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not parent_existed:
             os.chmod(database_path.parent, 0o700)
-        descriptor = os.open(
-            database_path,
-            os.O_CREAT | os.O_RDWR,
-            0o600,
-        )
-        os.close(descriptor)
-        os.chmod(database_path, 0o600)
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if database_path.is_symlink():
+            raise OSError("database path must not be a symbolic link")
+        try:
+            descriptor = os.open(
+                database_path,
+                os.O_CREAT | os.O_EXCL | os.O_RDWR | no_follow,
+                0o600,
+            )
+        except FileExistsError:
+            if database_path.is_symlink():
+                raise OSError("database path must not be a symbolic link") from None
+            descriptor = os.open(database_path, os.O_RDWR | no_follow)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError("database path must be a regular file")
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
     conn = sqlite3.connect(database_path, timeout=30, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")

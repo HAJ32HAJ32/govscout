@@ -56,6 +56,17 @@ def test_concurrent_first_database_connections_do_not_race(tmp_path, monkeypatch
     assert errors == [None, None]
 
 
+def test_database_creation_refuses_dangling_symlink(tmp_path):
+    external_target = tmp_path / "outside.sqlite3"
+    database = tmp_path / "govscout.sqlite3"
+    database.symlink_to(external_target)
+
+    with pytest.raises(OSError):
+        connect_database(database)
+
+    assert not external_target.exists()
+
+
 def _verified(number="12345678", name="Example Governance Ltd"):
     return verified_company_from_profile(
         {
