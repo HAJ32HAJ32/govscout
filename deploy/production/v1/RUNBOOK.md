@@ -79,7 +79,7 @@ sudo cp --preserve=mode,ownership,timestamps /var/lib/govscout/govscout.sqlite3 
 sudo sha256sum /var/backups/govscout/govscout.sqlite3.<UTC-timestamp>
 ```
 
-Record the path and checksum outside the VPS. Startup applies numbered migrations in one SQLite `BEGIN IMMEDIATE` transaction and checksum-verifies all prior migrations. Migration 007 adds persistent login-throttle state. Migration 008 installs FCA identity and canonical-URL guards. Migration 009 adds hashed, revocable collector devices and immutable, payload-bound imports. Migration 010 adds immutable Companies House verification attempts and binds passing QC to a successful attempt for the same FCA firm. Migration 011 adds the bounded durable FCA-processing queue. Treat the verified pre-release database backup as part of the release artefact.
+Record the path and checksum outside the VPS. Startup applies numbered migrations in one SQLite `BEGIN IMMEDIATE` transaction and checksum-verifies all prior migrations. Migration 007 adds persistent login-throttle state. Migration 008 installs FCA identity and canonical-URL guards. Migration 009 adds hashed, revocable collector devices and immutable, payload-bound imports. Migration 010 adds immutable Companies House verification attempts and binds passing QC to a successful attempt for the same FCA firm. Migration 011 adds the bounded durable FCA-processing queue. Migration 012 makes queue identity and legal state transitions database-enforced, prevents deletion or terminal rewrites, and appends immutable per-transition history. Treat the verified pre-release database backup as part of the release artefact.
 
 Only after that backup has been created and checksum-verified, atomically
 repoint the active symlink to the already-built immutable release:
@@ -142,13 +142,14 @@ and 100 immutable imports over that credential's lifetime; retries remain payloa
 1. Disable and stop `govscout-processing.timer`, then stop
    `govscout-processing.service` and GovScout.
 2. Repoint `/opt/govscout/current` to the prior immutable release.
-3. When reverting across migration 008, migration 010, or migration 011, always move the current
+3. When reverting across migration 008, migration 010, migration 011, or migration 012, always move the current
    database aside and restore the verified pre-release backup, even when no
    corruption is apparent. Pre-008 code is not approved against migration 008's
    write-enforcing triggers. Pre-010 code does not populate
    `qc_runs.company_verification_attempt_id`, so migration 010's passing-QC
    trigger will reject its writes. Pre-011 code does not manage the durable
-   processing queue. Restore owner `govscout:govscout` and mode
+   processing queue. Pre-012 code does not preserve or obey the queue's
+   database-enforced transition history. Restore owner `govscout:govscout` and mode
    `0600`.
 4. Start GovScout, run the probes, and inspect `journalctl -u govscout`,
    `journalctl -u govscout-processing`, and Caddy logs. Never copy an unverified
