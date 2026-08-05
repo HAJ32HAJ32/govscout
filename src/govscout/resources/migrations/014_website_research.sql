@@ -104,8 +104,14 @@ WHEN NOT (
         )
         SELECT 1 FROM labels WHERE length(label) NOT BETWEEN 1 AND 63
     )
-    AND instr(substr(NEW.website_url, 9), ':') = 0
-    AND instr(substr(NEW.website_url, 9), '@') = 0
+    AND instr(substr(
+        substr(NEW.website_url, 9), 1,
+        instr(substr(NEW.website_url, 9), '/') - 1
+    ), ':') = 0
+    AND instr(substr(
+        substr(NEW.website_url, 9), 1,
+        instr(substr(NEW.website_url, 9), '/') - 1
+    ), '@') = 0
     AND instr(NEW.website_url, '?') = 0
     AND instr(NEW.website_url, '#') = 0
     AND instr(NEW.website_url, '%') = 0
@@ -115,15 +121,24 @@ WHEN NOT (
     AND NEW.website_url NOT GLOB
         ('*[' || char(1) || '-' || char(32) || char(127) || ']*')
     AND instr(
-        substr(NEW.website_url, 9 + instr(substr(NEW.website_url, 9), '/')),
+        substr(
+            substr(NEW.website_url, 9),
+            instr(substr(NEW.website_url, 9), '/')
+        ),
         '//'
     ) = 0
     AND instr(
-        substr(NEW.website_url, 9 + instr(substr(NEW.website_url, 9), '/')),
+        substr(
+            substr(NEW.website_url, 9),
+            instr(substr(NEW.website_url, 9), '/')
+        ),
         '/./'
     ) = 0
     AND instr(
-        substr(NEW.website_url, 9 + instr(substr(NEW.website_url, 9), '/')),
+        substr(
+            substr(NEW.website_url, 9),
+            instr(substr(NEW.website_url, 9), '/')
+        ),
         '/../'
     ) = 0
     AND substr(NEW.website_url, -2) != '/.'
@@ -181,7 +196,10 @@ WHEN NOT (
         )
         SELECT 1 FROM labels WHERE length(label) NOT BETWEEN 1 AND 63
     )
-    AND instr(substr(NEW.evidence_url, 9), ':') = 0
+    AND instr(substr(
+        substr(NEW.evidence_url, 9), 1,
+        instr(substr(NEW.evidence_url, 9), '/') - 1
+    ), ':') = 0
     AND instr(substr(
         substr(NEW.evidence_url, 9), 1,
         instr(substr(NEW.evidence_url, 9), '/') - 1
@@ -193,6 +211,94 @@ WHEN NOT (
     AND length(CAST(NEW.evidence_url AS BLOB)) = length(NEW.evidence_url)
     AND NEW.evidence_url NOT GLOB
         ('*[' || char(1) || '-' || char(32) || char(127) || ']*')
+    AND instr(
+        CASE WHEN instr(substr(
+            substr(NEW.evidence_url, 9),
+            instr(substr(NEW.evidence_url, 9), '/')
+        ), '?') = 0 THEN substr(
+            substr(NEW.evidence_url, 9),
+            instr(substr(NEW.evidence_url, 9), '/')
+        ) ELSE substr(
+            substr(
+                substr(NEW.evidence_url, 9),
+                instr(substr(NEW.evidence_url, 9), '/')
+            ), 1, instr(substr(
+                substr(NEW.evidence_url, 9),
+                instr(substr(NEW.evidence_url, 9), '/')
+            ), '?') - 1
+        ) END,
+        '//'
+    ) = 0
+    AND instr(
+        CASE WHEN instr(substr(
+            substr(NEW.evidence_url, 9),
+            instr(substr(NEW.evidence_url, 9), '/')
+        ), '?') = 0 THEN substr(
+            substr(NEW.evidence_url, 9),
+            instr(substr(NEW.evidence_url, 9), '/')
+        ) ELSE substr(
+            substr(
+                substr(NEW.evidence_url, 9),
+                instr(substr(NEW.evidence_url, 9), '/')
+            ), 1, instr(substr(
+                substr(NEW.evidence_url, 9),
+                instr(substr(NEW.evidence_url, 9), '/')
+            ), '?') - 1
+        ) END,
+        '/./'
+    ) = 0
+    AND instr(
+        CASE WHEN instr(substr(
+            substr(NEW.evidence_url, 9),
+            instr(substr(NEW.evidence_url, 9), '/')
+        ), '?') = 0 THEN substr(
+            substr(NEW.evidence_url, 9),
+            instr(substr(NEW.evidence_url, 9), '/')
+        ) ELSE substr(
+            substr(
+                substr(NEW.evidence_url, 9),
+                instr(substr(NEW.evidence_url, 9), '/')
+            ), 1, instr(substr(
+                substr(NEW.evidence_url, 9),
+                instr(substr(NEW.evidence_url, 9), '/')
+            ), '?') - 1
+        ) END,
+        '/../'
+    ) = 0
+    AND (
+        CASE WHEN instr(substr(
+            substr(NEW.evidence_url, 9),
+            instr(substr(NEW.evidence_url, 9), '/')
+        ), '?') = 0 THEN substr(
+            substr(NEW.evidence_url, 9),
+            instr(substr(NEW.evidence_url, 9), '/')
+        ) ELSE substr(
+            substr(
+                substr(NEW.evidence_url, 9),
+                instr(substr(NEW.evidence_url, 9), '/')
+            ), 1, instr(substr(
+                substr(NEW.evidence_url, 9),
+                instr(substr(NEW.evidence_url, 9), '/')
+            ), '?') - 1
+        ) END
+    ) NOT GLOB '*/.'
+    AND (
+        CASE WHEN instr(substr(
+            substr(NEW.evidence_url, 9),
+            instr(substr(NEW.evidence_url, 9), '/')
+        ), '?') = 0 THEN substr(
+            substr(NEW.evidence_url, 9),
+            instr(substr(NEW.evidence_url, 9), '/')
+        ) ELSE substr(
+            substr(
+                substr(NEW.evidence_url, 9),
+                instr(substr(NEW.evidence_url, 9), '/')
+            ), 1, instr(substr(
+                substr(NEW.evidence_url, 9),
+                instr(substr(NEW.evidence_url, 9), '/')
+            ), '?') - 1
+        ) END
+    ) NOT GLOB '*/..'
 )
 BEGIN
     SELECT RAISE(ABORT, 'website evidence URLs must be canonical HTTPS');

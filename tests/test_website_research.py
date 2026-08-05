@@ -184,12 +184,49 @@ def test_website_assertion_rejects_urls_transport_cannot_process(tmp_path, websi
 @pytest.mark.parametrize(
     ("website_url", "evidence_url"),
     [
+        (
+            "https://official.example.test/team@office:lead",
+            "https://register.example.test/source",
+        ),
+        (
+            "https://official.example.test/",
+            "https://register.example.test/lookup?url=https://official.example.test/",
+        ),
+    ],
+)
+def test_database_accepts_application_canonical_research_urls(
+    tmp_path, website_url, evidence_url
+):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm = _verified_firm(conn)
+
+    event_id = record_website_evidence(
+        conn,
+        firm_id=firm["id"],
+        action="assert",
+        website_url=website_url,
+        evidence_url=evidence_url,
+        justification="The source identifies the regulated company by name.",
+        actor="operator",
+        expected_previous_event_id=None,
+        now=NOW,
+    )
+
+    assert event_id == 1
+
+
+@pytest.mark.parametrize(
+    ("website_url", "evidence_url"),
+    [
         ("https://official.example.test/", "https://EXAMPLE.test/source"),
         ("https://official.example.test/", "https://-bad.example.test/source"),
         ("https://official.example.test/", "https://example.test:444/source"),
         ("https://official.example.test/", "https://exämple.test/source"),
         ("https://official.example.test/", "https://example.test/%zz"),
         ("https://official.example.test/", "https://example.test/café"),
+        ("https://official.example.test/", "https://example.test/a//b"),
+        ("https://official.example.test/", "https://example.test/a/../b"),
         ("https://official.example.test/", "https://" + "a" * 64 + ".test/source"),
         (
             "https://official.example.test/",
