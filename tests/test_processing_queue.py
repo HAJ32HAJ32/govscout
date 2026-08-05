@@ -5,6 +5,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import govscout.db as db_module
+import govscout.processing_queue as processing_queue
 from govscout.auth import create_collector_device
 from govscout.cli import main
 from govscout.collector_imports import process_collector_import
@@ -130,6 +132,37 @@ def test_worker_processes_due_job_once_without_creating_outreach_records(tmp_pat
     for table in ("leads", "firm_reviews", "sends"):
         assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
 
+    events = conn.execute(
+        """
+        SELECT from_state, to_state, attempt_count, outcome_code
+        FROM fca_processing_job_events ORDER BY id
+        """
+    ).fetchall()
+    assert [tuple(event) for event in events] == [
+        (None, "pending", 0, None),
+        ("pending", "running", 1, None),
+        ("running", "succeeded", 1, "QC_PASS"),
+    ]
+
+    with pytest.raises(sqlite3.IntegrityError, match="terminal|transition"):
+        conn.execute(
+            """
+            UPDATE fca_processing_jobs
+            SET state = 'running', completed_at = NULL, outcome_code = NULL
+            """
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="cannot be deleted"):
+        conn.execute("DELETE FROM fca_processing_jobs")
+    with pytest.raises(sqlite3.IntegrityError, match="identity is immutable"):
+        conn.execute(
+            "UPDATE fca_processing_jobs SET source_record_hash = ?",
+            ("b" * 64,),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        conn.execute("UPDATE fca_processing_job_events SET outcome_code = 'QC_FAIL'")
+    with pytest.raises(sqlite3.IntegrityError, match="cannot be deleted"):
+        conn.execute("DELETE FROM fca_processing_job_events")
+
 
 def test_worker_records_permanent_missing_website_and_fail_closed_qc(tmp_path):
     conn = connect_database(tmp_path / "govscout.sqlite3")
@@ -222,14 +255,10 @@ def test_reclaimed_job_rejects_completion_from_expired_owner(tmp_path):
     conn = connect_database(tmp_path / "govscout.sqlite3")
     migrate(conn)
     _queue_firm(conn)
-    claim_now = NOW + timedelta(seconds=2)
-    old_claim = _claim_next_job(conn, now=claim_now)
+    stale_claim = NOW + timedelta(seconds=2)
+    claim_now = stale_claim + timedelta(minutes=16)
+    old_claim = _claim_next_job(conn, now=stale_claim)
     assert old_claim is not None
-    stale_claim = claim_now - timedelta(minutes=16)
-    conn.execute(
-        "UPDATE fca_processing_jobs SET claimed_at = ? WHERE id = ?",
-        (stale_claim.isoformat(), old_claim.job_id),
-    )
     new_claim = _claim_next_job(conn, now=claim_now)
     assert new_claim is not None
     assert old_claim.claim_token != new_claim.claim_token
@@ -303,6 +332,74 @@ def test_queue_schema_rejects_exhausted_pending_and_unfenced_running_states(tmp_
         )
 
 
+def test_queue_schema_rejects_attempt_count_corruption_across_transitions(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    _queue_firm(conn)
+    timestamp = (NOW + timedelta(seconds=2)).isoformat()
+
+    with pytest.raises(sqlite3.IntegrityError, match="illegal.*transition"):
+        conn.execute(
+            """
+            UPDATE fca_processing_jobs
+            SET state = 'running', attempt_count = 3, claimed_at = ?,
+                claim_token = ?, outcome_code = NULL, updated_at = ?
+            """,
+            (timestamp, "5" * 32, timestamp),
+        )
+
+    claim = _claim_next_job(conn, now=NOW + timedelta(seconds=2))
+    assert claim is not None
+    with pytest.raises(sqlite3.IntegrityError, match="illegal.*transition"):
+        conn.execute(
+            """
+            UPDATE fca_processing_jobs
+            SET state = 'pending', attempt_count = 0, claimed_at = NULL,
+                claim_token = NULL, completed_at = NULL, outcome_code = NULL,
+                available_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, timestamp, claim.job_id),
+        )
+
+
+def test_migration_012_upgrades_populated_011_queue_and_accepts_worker_completion(
+    tmp_path, monkeypatch
+):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrations = db_module._migration_texts()
+    monkeypatch.setattr(db_module, "_migration_texts", lambda: migrations[:11])
+    migrate(conn)
+    _queue_firm(conn)
+    claim = _claim_next_job(conn, now=NOW + timedelta(seconds=2))
+    assert claim is not None
+
+    monkeypatch.setattr(db_module, "_migration_texts", lambda: migrations)
+    migrate(conn)
+    _record_outcome(
+        conn,
+        job=claim,
+        state="failed",
+        outcome_code="PROCESSING_ERROR",
+        now=NOW + timedelta(seconds=3),
+    )
+
+    job = conn.execute(
+        "SELECT state, attempt_count, outcome_code FROM fca_processing_jobs"
+    ).fetchone()
+    events = conn.execute(
+        """
+        SELECT from_state, to_state, attempt_count, outcome_code
+        FROM fca_processing_job_events ORDER BY id
+        """
+    ).fetchall()
+    assert tuple(job) == ("failed", 1, "PROCESSING_ERROR")
+    assert [tuple(event) for event in events] == [
+        (None, "running", 1, None),
+        ("running", "failed", 1, "PROCESSING_ERROR"),
+    ]
+
+
 def test_worker_exhausts_transient_failures_after_three_attempts(tmp_path):
     conn = connect_database(tmp_path / "govscout.sqlite3")
     migrate(conn)
@@ -353,6 +450,51 @@ def test_worker_does_not_hide_unexpected_programming_errors(tmp_path):
         "SELECT state, attempt_count, outcome_code FROM fca_processing_jobs"
     ).fetchone()
     assert tuple(job) == ("running", 1, None)
+
+
+def test_worker_does_not_record_qc_pass_after_verification_becomes_non_current(
+    tmp_path, monkeypatch
+):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    _queue_firm(conn)
+    real_process_firm = processing_queue.process_firm
+
+    def process_then_invalidate(*args, **kwargs):
+        result = real_process_firm(*args, **kwargs)
+        firm = conn.execute(
+            "SELECT company_number, source_record_hash FROM fca_firms WHERE id = 1"
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO company_verification_attempts (
+                firm_id, company_number, state, reason_code, checked_at,
+                fca_source_record_hash
+            ) VALUES (1, ?, 'error', 'TRANSPORT_ERROR', ?, ?)
+            """,
+            (
+                firm["company_number"],
+                (NOW + timedelta(seconds=3)).isoformat(),
+                firm["source_record_hash"],
+            ),
+        )
+        return result
+
+    monkeypatch.setattr(processing_queue, "process_firm", process_then_invalidate)
+
+    result = run_pending_jobs(
+        conn,
+        companies_house=_companies_house(),
+        site_transport=_complete_site(),
+        now=NOW + timedelta(seconds=2),
+        limit=1,
+    )
+
+    assert (result.claimed, result.succeeded, result.failed) == (1, 0, 1)
+    job = conn.execute(
+        "SELECT state, outcome_code FROM fca_processing_jobs"
+    ).fetchone()
+    assert tuple(job) == ("failed", "QC_STALE_BEFORE_COMPLETION")
 
 
 def test_worker_rejects_unbounded_limits(tmp_path):

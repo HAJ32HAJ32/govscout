@@ -388,6 +388,28 @@ def _assert_firm_snapshot_current(
         raise SiteFetchError("FCA_IDENTITY_CHANGED")
 
 
+def _assert_verification_current(
+    conn: sqlite3.Connection,
+    *,
+    firm_id: int,
+    verification_attempt_id: int,
+    now: datetime,
+) -> None:
+    latest = conn.execute(
+        """
+        SELECT id FROM company_verification_attempts
+        WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+        """,
+        (firm_id,),
+    ).fetchone()
+    if (
+        latest is None
+        or int(latest["id"]) != verification_attempt_id
+        or not company_verification_is_current(conn, firm_id=firm_id, now=now)
+    ):
+        raise SiteFetchError("COMPANIES_HOUSE_VERIFICATION_CHANGED")
+
+
 def run_enrichment(
     conn: sqlite3.Connection,
     *,
@@ -408,6 +430,16 @@ def run_enrichment(
         raise KeyError(firm_id)
     if not company_verification_is_current(conn, firm_id=firm_id, now=now):
         raise SiteFetchError("COMPANIES_HOUSE_VERIFICATION_REQUIRED")
+    verification = conn.execute(
+        """
+        SELECT id FROM company_verification_attempts
+        WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+        """,
+        (firm_id,),
+    ).fetchone()
+    if verification is None:
+        raise SiteFetchError("COMPANIES_HOUSE_VERIFICATION_REQUIRED")
+    verification_attempt_id = int(verification["id"])
     website = firm["website_url"]
     if website is None:
         raise SiteFetchError("WEBSITE_MISSING")
@@ -467,6 +499,10 @@ def run_enrichment(
         if page.fetched_at.tzinfo is None or page.fetched_at.utcoffset() is None:
             failures[key] = "INVALID_TIMESTAMP"
             continue
+        if _plain_text(page.html).casefold() == _plain_text(pages["home"].html).casefold():
+            failures[key] = "DUPLICATE_CONTENT"
+            failure_urls[key] = page.final_url
+            continue
         if page.final_url != pages["home"].final_url:
             pages[key] = page
             continue
@@ -478,6 +514,12 @@ def run_enrichment(
         try:
             conn.execute("BEGIN IMMEDIATE")
             _assert_firm_snapshot_current(conn, firm_id=firm_id, snapshot=firm)
+            _assert_verification_current(
+                conn,
+                firm_id=firm_id,
+                verification_attempt_id=verification_attempt_id,
+                now=now,
+            )
             conn.execute(
                 """
                 INSERT INTO enrichment_runs (
@@ -574,6 +616,12 @@ def run_enrichment(
     try:
         conn.execute("BEGIN IMMEDIATE")
         _assert_firm_snapshot_current(conn, firm_id=firm_id, snapshot=firm)
+        _assert_verification_current(
+            conn,
+            firm_id=firm_id,
+            verification_attempt_id=verification_attempt_id,
+            now=now,
+        )
         run_id = conn.execute(
             """
             INSERT INTO enrichment_runs (

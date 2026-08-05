@@ -132,10 +132,18 @@ def _approve_fca_firm(conn, lead_id, *, now):
 
     class PassingTransport:
         def fetch_html(self, url):
+            pages = {
+                "https://example.test/": "FCA regulated. AI-powered services.",
+                "https://example.test/privacy": (
+                    "Privacy notice with automated decision safeguards."
+                ),
+                "https://example.test/careers": "Careers for our Copilot-enabled team.",
+                "https://example.test/ai-policy": "Our AI governance policy and oversight.",
+            }
             return SitePage(
                 url=url,
                 final_url=url,
-                html="FCA regulated. AI-powered. Privacy automated decision safeguards.",
+                html=pages[url],
                 fetched_at=now,
             )
 

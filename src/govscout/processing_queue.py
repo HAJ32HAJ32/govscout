@@ -12,7 +12,7 @@ from govscout.companies_house_http import CompaniesHouseTransportError
 from govscout.enrichment import SiteFetchError, SiteTransport
 from govscout.fca_pipeline import CompanyVerifier, FcaEligibilityError
 from govscout.processing import process_firm
-from govscout.quality import run_qc
+from govscout.quality import qc_is_current, run_qc
 
 
 MAX_JOB_ATTEMPTS = 3
@@ -30,6 +30,7 @@ _TRANSIENT_CODES = frozenset(
 _SITE_FAILURE_CODES = frozenset(
     {
         "COMPANIES_HOUSE_VERIFICATION_REQUIRED",
+        "COMPANIES_HOUSE_VERIFICATION_CHANGED",
         "DNS_FAILED",
         "FCA_IDENTITY_CHANGED",
         "FETCH_FAILED",
@@ -193,7 +194,7 @@ def _record_outcome(
     outcome_code: str,
     now: datetime,
     available_at: datetime | None = None,
-) -> None:
+) -> tuple[str, str]:
     timestamp = now.astimezone(UTC).isoformat()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -205,6 +206,20 @@ def _record_outcome(
             state = "failed"
             outcome_code = "SOURCE_CHANGED"
             available_at = None
+        if state == "succeeded" and outcome_code == "QC_PASS":
+            latest_qc = conn.execute(
+                "SELECT id FROM qc_runs WHERE firm_id = ? ORDER BY id DESC LIMIT 1",
+                (job.firm_id,),
+            ).fetchone()
+            if latest_qc is None or not qc_is_current(
+                conn,
+                firm_id=job.firm_id,
+                qc_run_id=int(latest_qc["id"]),
+                now=now,
+            ):
+                state = "failed"
+                outcome_code = "QC_STALE_BEFORE_COMPLETION"
+                available_at = None
         if state == "pending":
             if available_at is None:
                 raise ValueError("pending processing outcome requires available_at")
@@ -243,6 +258,7 @@ def _record_outcome(
         if updated.rowcount != 1:
             raise sqlite3.OperationalError("processing job completion lost")
         conn.execute("COMMIT")
+        return state, outcome_code
     except Exception:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
@@ -356,14 +372,17 @@ def _run_pending_jobs_locked(
                 failed += 1
             continue
         outcome = "QC_PASS" if result.qc.passed else "QC_FAIL"
-        _record_outcome(
+        final_state, _final_outcome = _record_outcome(
             conn,
             job=job,
             state="succeeded",
             outcome_code=outcome,
             now=job_now,
         )
-        succeeded += 1
+        if final_state == "succeeded":
+            succeeded += 1
+        else:
+            failed += 1
     return QueueRunResult(claimed, succeeded, failed, retried)
 
 

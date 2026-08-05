@@ -293,49 +293,58 @@ def _evaluate_current(
 def run_qc(conn: sqlite3.Connection, *, firm_id: int, now: datetime) -> QcResult:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
+    if conn.in_transaction:
+        raise sqlite3.OperationalError("QC requires no active transaction")
     current = now.astimezone(UTC)
-    firm = conn.execute("SELECT * FROM fca_firms WHERE id = ?", (firm_id,)).fetchone()
-    if firm is None:
-        raise KeyError(firm_id)
-    run, evidence = _latest_inputs(conn, firm_id=firm_id)
-    ordered_reasons = tuple(
-        sorted(
-            _evaluate_current(
-                conn, firm=firm, run=run, evidence=evidence, current=current
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        firm = conn.execute("SELECT * FROM fca_firms WHERE id = ?", (firm_id,)).fetchone()
+        if firm is None:
+            raise KeyError(firm_id)
+        run, evidence = _latest_inputs(conn, firm_id=firm_id)
+        ordered_reasons = tuple(
+            sorted(
+                _evaluate_current(
+                    conn, firm=firm, run=run, evidence=evidence, current=current
+                )
             )
         )
-    )
-    passed = not ordered_reasons
-    reason_json = json.dumps(ordered_reasons, separators=(",", ":"))
-    input_hash = _qc_input_hash(conn, firm, run, evidence)
-    verification = _latest_company_verification(conn, firm)
-    verification_attempt_id = (
-        verification["id"]
-        if verification is not None and verification["state"] == "verified"
-        else None
-    )
-    checked = current.isoformat()
-    expires = (current + QC_VALIDITY).isoformat()
-    qc_run_id = conn.execute(
-        """
-        INSERT INTO qc_runs (
-            firm_id, enrichment_run_id, state, reason_codes,
-            input_hash, checked_at, expires_at, company_verification_attempt_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            firm_id,
-            run["id"] if run is not None and run["state"] == "complete" else None,
-            "pass" if passed else "fail",
-            reason_json,
-            input_hash,
-            checked,
-            expires,
-            verification_attempt_id,
-        ),
-    ).lastrowid
-    if qc_run_id is None:
-        raise RuntimeError("SQLite did not return a QC run id")
+        passed = not ordered_reasons
+        reason_json = json.dumps(ordered_reasons, separators=(",", ":"))
+        input_hash = _qc_input_hash(conn, firm, run, evidence)
+        verification = _latest_company_verification(conn, firm)
+        verification_attempt_id = (
+            verification["id"]
+            if verification is not None and verification["state"] == "verified"
+            else None
+        )
+        checked = current.isoformat()
+        expires = (current + QC_VALIDITY).isoformat()
+        qc_run_id = conn.execute(
+            """
+            INSERT INTO qc_runs (
+                firm_id, enrichment_run_id, state, reason_codes,
+                input_hash, checked_at, expires_at, company_verification_attempt_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                firm_id,
+                run["id"] if run is not None and run["state"] == "complete" else None,
+                "pass" if passed else "fail",
+                reason_json,
+                input_hash,
+                checked,
+                expires,
+                verification_attempt_id,
+            ),
+        ).lastrowid
+        if qc_run_id is None:
+            raise RuntimeError("SQLite did not return a QC run id")
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
     return QcResult(int(qc_run_id), passed, ordered_reasons)
 
 

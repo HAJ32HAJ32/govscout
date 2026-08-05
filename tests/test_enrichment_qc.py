@@ -316,6 +316,42 @@ def test_auxiliary_redirect_to_home_is_unknown_and_fails_qc(tmp_path):
     assert "EVIDENCE_UNKNOWN" in qc.reasons
 
 
+def test_auxiliary_pages_with_homepage_content_are_unknown_and_fail_qc(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+    generic = "FCA regulated. AI-powered advice. Privacy and automated decisions. AI policy."
+    transport = FakeSiteTransport(
+        {
+            "https://example.test/": generic,
+            "https://example.test/privacy": generic,
+            "https://example.test/careers": generic,
+            "https://example.test/ai-policy": generic,
+        }
+    )
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+    unknown = conn.execute(
+        """
+        SELECT code, evidence_state FROM evidence_items
+        WHERE run_id = ? AND evidence_state = 'unknown' ORDER BY code
+        """,
+        (result.run_id,),
+    ).fetchall()
+    qc = run_qc(conn, firm_id=firm_id, now=NOW)
+
+    assert [tuple(row) for row in unknown] == [
+        ("AI_POLICY_STATUS", "unknown"),
+        ("CAREERS_SCAN_STATUS", "unknown"),
+        ("POLICY_SCAN_STATUS", "unknown"),
+        ("PRIVACY_AI_STATUS", "unknown"),
+        ("PRIVACY_SCAN_STATUS", "unknown"),
+    ]
+    assert not qc.passed
+    assert "EVIDENCE_UNKNOWN" in qc.reasons
+
+
 def test_redirected_not_found_evidence_records_actual_final_url(tmp_path):
     conn = connect_database(tmp_path / "govscout.sqlite3")
     migrate(conn)
@@ -373,6 +409,65 @@ def test_enrichment_rejects_fca_identity_changed_during_network_fetch(tmp_path):
         run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
 
     assert conn.execute("SELECT count(*) FROM enrichment_runs").fetchone()[0] == 0
+
+
+def test_enrichment_rejects_verification_changed_during_network_fetch(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+
+    class VerificationMutatingTransport(FakeSiteTransport):
+        def fetch_html(self, url):
+            if not self.urls:
+                firm = conn.execute(
+                    "SELECT company_number, source_record_hash FROM fca_firms WHERE id = ?",
+                    (firm_id,),
+                ).fetchone()
+                conn.execute(
+                    """
+                    INSERT INTO company_verification_attempts (
+                        firm_id, company_number, state, reason_code, checked_at,
+                        fca_source_record_hash
+                    ) VALUES (?, ?, 'error', 'TRANSPORT_ERROR', ?, ?)
+                    """,
+                    (
+                        firm_id,
+                        firm["company_number"],
+                        (NOW + timedelta(seconds=1)).isoformat(),
+                        firm["source_record_hash"],
+                    ),
+                )
+            return super().fetch_html(url)
+
+    transport = VerificationMutatingTransport(
+        {
+            "https://example.test/": "FCA regulated. AI-powered advice.",
+            "https://example.test/privacy": "Privacy and automated decisions.",
+            "https://example.test/careers": "Copilot.",
+            "https://example.test/ai-policy": "AI policy.",
+        }
+    )
+
+    with pytest.raises(SiteFetchError, match="VERIFICATION_CHANGED"):
+        run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    assert conn.execute("SELECT count(*) FROM enrichment_runs").fetchone()[0] == 0
+
+
+def test_qc_requires_its_own_atomic_write_transaction(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    conn.execute("BEGIN")
+
+    with pytest.raises(
+        sqlite3.OperationalError, match="QC requires no active transaction"
+    ):
+        run_qc(conn, firm_id=firm_id, now=NOW)
+
+    conn.execute("ROLLBACK")
+    assert conn.execute("SELECT count(*) FROM qc_runs").fetchone()[0] == 0
 
 
 def test_enrichment_rejects_firm_without_current_legal_verification(tmp_path):
