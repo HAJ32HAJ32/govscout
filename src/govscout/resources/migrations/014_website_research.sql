@@ -387,10 +387,17 @@ CREATE TRIGGER fca_reprocessing_jobs_insert_guard
 BEFORE INSERT ON fca_reprocessing_jobs
 WHEN NOT (
     EXISTS (
-        SELECT 1 FROM fca_processing_jobs AS source
+        SELECT 1
+        FROM fca_processing_jobs AS source
+        JOIN firm_website_evidence_events AS evidence
+          ON evidence.id = NEW.website_evidence_event_id
+         AND source.import_id = evidence.collector_import_id
+        JOIN collector_imports AS imported
+          ON imported.import_id = source.import_id
         WHERE source.id = NEW.source_job_id
           AND source.firm_id = NEW.firm_id
           AND source.source_record_hash = NEW.source_record_hash
+          AND imported.state = 'accepted'
     )
     AND EXISTS (
         SELECT 1 FROM firm_website_evidence_events AS evidence
@@ -426,6 +433,12 @@ WHEN NOT (
             WHERE firm_id = NEW.firm_id ORDER BY id DESC LIMIT 1
         ) AND archive.action = 'archive'
     )
+    AND NEW.state = 'pending'
+    AND NEW.attempt_count = 0
+    AND NEW.claimed_at IS NULL
+    AND NEW.claim_token IS NULL
+    AND NEW.completed_at IS NULL
+    AND NEW.outcome_code IS NULL
 )
 BEGIN
     SELECT RAISE(ABORT, 'reprocessing input is not current');
@@ -464,6 +477,46 @@ CREATE TABLE fca_reprocessing_job_events (
 
 CREATE INDEX idx_fca_reprocessing_job_events_job
 ON fca_reprocessing_job_events(job_id, id);
+
+CREATE TRIGGER fca_reprocessing_job_events_insert_guard
+BEFORE INSERT ON fca_reprocessing_job_events
+WHEN NOT (
+    EXISTS (
+        SELECT 1 FROM fca_reprocessing_jobs AS job
+        WHERE job.id = NEW.job_id
+          AND job.state = NEW.to_state
+          AND job.attempt_count = NEW.attempt_count
+          AND job.outcome_code IS NEW.outcome_code
+          AND job.updated_at = NEW.occurred_at
+    )
+    AND (
+        (
+            NOT EXISTS (
+                SELECT 1 FROM fca_reprocessing_job_events
+                WHERE job_id = NEW.job_id
+            )
+            AND NEW.from_state IS NULL
+            AND NEW.to_state = 'pending'
+            AND NEW.attempt_count = 0
+            AND NEW.outcome_code IS NULL
+        )
+        OR (
+            NEW.from_state = (
+                SELECT to_state FROM fca_reprocessing_job_events
+                WHERE job_id = NEW.job_id ORDER BY id DESC LIMIT 1
+            )
+            AND (
+                (NEW.from_state = 'pending' AND NEW.to_state = 'running')
+                OR (NEW.from_state = 'running' AND NEW.to_state IN (
+                    'pending', 'succeeded', 'failed'
+                ))
+            )
+        )
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'reprocessing event history mismatch');
+END;
 
 CREATE TRIGGER fca_reprocessing_jobs_immutable_identity
 BEFORE UPDATE ON fca_reprocessing_jobs

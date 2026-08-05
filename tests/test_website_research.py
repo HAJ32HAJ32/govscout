@@ -287,9 +287,54 @@ def test_reprocessing_requires_current_verified_identity_and_is_idempotent(tmp_p
     assert conn.execute("SELECT count(*) FROM fca_reprocessing_jobs").fetchone()[0] == 1
 
 
+def test_database_rejects_fabricated_reprocessing_history(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm = _verified_firm(conn)
+    evidence_id = record_website_evidence(
+        conn,
+        firm_id=firm["id"],
+        action="assert",
+        website_url="https://official.example.test/",
+        evidence_url="https://official.example.test/legal",
+        justification="The legal page identifies the regulated company by name.",
+        actor="local-operator",
+        expected_previous_event_id=None,
+        now=NOW,
+    )
+    queued = enqueue_website_reprocessing(
+        conn,
+        firm_id=firm["id"],
+        expected_website_evidence_event_id=evidence_id,
+        requested_by="local-operator",
+        request_reason="Use the verified official website for processing.",
+        now=NOW,
+    )
+
+    with pytest.raises(sqlite3.IntegrityError, match="history"):
+        conn.execute(
+            """
+            INSERT INTO fca_reprocessing_job_events (
+                job_id, from_state, to_state, attempt_count,
+                outcome_code, occurred_at
+            ) VALUES (?, 'pending', 'succeeded', 0, 'QC_PASS', ?)
+            """,
+            (queued.job_id, (NOW + timedelta(minutes=1)).isoformat()),
+        )
+
+
 def test_database_rejects_mutable_or_mismatched_research_dependencies(tmp_path):
     conn = connect_database(tmp_path / "govscout.sqlite3")
     migrate(conn)
+    insert_guard = conn.execute(
+        """
+        SELECT sql FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'fca_reprocessing_jobs_insert_guard'
+        """
+    ).fetchone()[0]
+    assert "source.import_id = evidence.collector_import_id" in insert_guard
+    assert "imported.import_id = source.import_id" in insert_guard
+    assert "imported.state = 'accepted'" in insert_guard
     firm = _verified_firm(conn)
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
