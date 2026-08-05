@@ -29,7 +29,6 @@ from govscout.auth import (
     authenticate_collector_token,
     verify_password,
 )
-from govscout.cli import format_counter
 from govscout.collector_imports import COLLECTOR_BATCH_LIMIT, process_collector_import
 from govscout.draft_service import (
     DraftAlreadySent,
@@ -37,7 +36,12 @@ from govscout.draft_service import (
     DraftPolicyRefused,
     DraftService,
 )
-from govscout.fca_discovery import FCA_MAX_RESPONSE_BYTES, FcaDataError, parse_fca_json
+from govscout.fca_discovery import (
+    FCA_MAX_RESPONSE_BYTES,
+    FcaDataError,
+    fca_register_search_url,
+    parse_fca_json,
+)
 from govscout.quality import qc_is_current, review_firm
 from govscout.sendguard import (
     ReservationConflict,
@@ -363,7 +367,6 @@ def create_app(
         current = clock()
         conn = conn_factory()
         try:
-            decision = guard.status(conn, now=current)
             firm_rows = conn.execute(
                 """
                 SELECT f.*,
@@ -406,6 +409,7 @@ def create_app(
                     continue
                 item = dict(row)
                 item["qc_current"] = qc_current
+                item["fca_register_url"] = fca_register_search_url(row["frn"])
                 if row["enrichment_run_id"] is None:
                     item["evidence"] = []
                 else:
@@ -437,19 +441,9 @@ def create_app(
                     break
         finally:
             conn.close()
-        due_candidates = []
-        if candidate_source is not None:
-            due_candidates = sorted(
-                candidate_source.due(),
-                key=lambda item: (item.stage == 0, item.lead_id),
-            )
         return render_template(
             "today.html",
-            counter=format_counter(decision),
-            decision=decision,
-            drafting_locked=drafting_locked,
             csrf_token=session["csrf_token"],
-            due_candidates=due_candidates,
             research_firms=research_firms,
             review_firms=review_firms,
             auth_enabled=auth is not None,

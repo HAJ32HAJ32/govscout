@@ -49,19 +49,6 @@
     <p>Review possible firms for MISE. Check why each one may be worth a conversation, then approve or reject it.</p>
   </header>
   <main>
-    <section class="banner" aria-label="Drafts available today">
-      <strong>Drafts today: {{ decision.today_count }} of {{ decision.effective_hard_limit }}</strong>
-      <p>{{ decision.remaining }} still available today.</p>
-      {% for message in decision.messages %}<p>{{ message }}</p>{% endfor %}
-    </section>
-    {% if drafting_locked %}
-    <section class="locked" role="status">
-      <strong>Email drafting is off for now</strong>
-      <p>You can still review and approve firms. GovScout will not create Gmail drafts until the writing checks are ready.</p>
-      <p class="meta">System status: LINT_NOT_READY</p>
-    </section>
-    {% endif %}
-
     <section class="worklist" aria-labelledby="research-title">
       <h2 id="research-title">Needs research</h2>
       <p>These firms are not yet through legal verification, enrichment, and current quality checks. They cannot be approved here.</p>
@@ -73,7 +60,7 @@
               <h3>{{ firm.firm_name }}</h3>
               <div class="meta">FCA reference {{ firm.frn }} · {{ firm.fca_status }} · {{ firm.source_location or "Location not found" }}</div>
               <div class="meta">
-                <a href="{{ firm.source_url }}" target="_blank" rel="noopener noreferrer">View FCA record</a>
+                <a href="{{ firm.fca_register_url }}" target="_blank" rel="noopener noreferrer">Find on FCA Register</a>
                 {% if firm.website_url %} · <a href="{{ firm.website_url }}" target="_blank" rel="noopener noreferrer">Website</a>{% endif %}
                 {% if firm.company_number %} · Company number {{ firm.company_number }}{% else %} · Company match not available{% endif %}
               </div>
@@ -136,7 +123,7 @@
               <h3>{{ firm.firm_name }}</h3>
               <div class="meta">FCA reference {{ firm.frn }} · {{ firm.fca_status }} · {{ firm.source_location or "Location not found" }}</div>
               <div class="meta">
-                <a href="{{ firm.source_url }}" target="_blank" rel="noopener noreferrer">View FCA record</a>
+                <a href="{{ firm.fca_register_url }}" target="_blank" rel="noopener noreferrer">Find on FCA Register</a>
                 {% if firm.website_url %} · <a href="{{ firm.website_url }}" target="_blank" rel="noopener noreferrer">Website</a>{% endif %}
                 {% if firm.company_number %} · Company number {{ firm.company_number }}{% else %} · Company match not available{% endif %}
               </div>
@@ -193,22 +180,6 @@
       {% endif %}
     </section>
 
-    <section class="worklist" aria-labelledby="worklist-title">
-      <h2 id="worklist-title">Email drafts</h2>
-      {% if due_candidates %}
-        {% if not drafting_locked %}
-        <form action="/today/drafts" method="post">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button class="approve" type="submit">Create Gmail drafts for review</button>
-        </form>
-        {% endif %}
-        <ol>
-        {% for candidate in due_candidates %}
-          <li class="firm"><strong>Firm {{ candidate.lead_id }}</strong> · Follow-up step {{ candidate.stage }}</li>
-        {% endfor %}
-        </ol>
-      {% else %}<p>No firms are ready for an email draft.</p>{% endif %}
-    </section>
   </main>
 </body>
 </html>

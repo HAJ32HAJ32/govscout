@@ -67,16 +67,31 @@ class ReturningDraftService:
         )
 
 
-def test_today_shows_authoritative_counter_and_fail_closed_lint_lock(tmp_path):
+def test_today_omits_drafting_presentation_without_loading_draft_work(tmp_path, monkeypatch):
     database = tmp_path / "govscout.sqlite3"
     conn = connect_database(database)
     migrate(conn)
     conn.close()
     settings = load_settings(ROOT / "config/default.toml")
+    monkeypatch.setattr(
+        SendGuard,
+        "status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("draft quota was loaded")
+        ),
+    )
+
+    class NoDraftCandidates:
+        def get(self, _lead_id: int) -> ReservationRequest:
+            raise AssertionError("draft candidate was loaded")
+
+        def due(self) -> list[ReservationRequest]:
+            raise AssertionError("draft candidates were loaded")
 
     app = create_app(
         conn_factory=lambda: connect_database(database),
         guard=SendGuard(settings),
+        candidate_source=NoDraftCandidates(),
         now_provider=lambda: datetime(2026, 7, 21, 8, 30, tzinfo=UTC),
     )
     app.testing = True
@@ -85,11 +100,10 @@ def test_today_shows_authoritative_counter_and_fail_closed_lint_lock(tmp_path):
 
     assert response.status_code == 200
     page = response.get_data(as_text=True)
-    assert "Drafts today: 0 of 5" in page
-    assert "Email drafting is off for now" in page
-    assert "You can still review and approve firms" in page
-    assert "System status: LINT_NOT_READY" in page
-    assert "effective hard" not in page
+    assert "Drafts today" not in page
+    assert "Email drafting" not in page
+    assert "Email drafts" not in page
+    assert "LINT_NOT_READY" not in page
 
 
 def test_today_does_not_hide_review_ready_firm_behind_fifty_research_items(
@@ -242,7 +256,8 @@ def test_today_shows_branded_fca_evidence_score_and_review_controls(tmp_path):
     assert "Needs research" in page
     assert "Example Finance Ltd" in page
     assert "London" in page
-    assert f'href="{source_url}"' in page
+    assert 'href="https://register.fca.org.uk/s/search?q=123456&amp;type=Companies"' in page
+    assert f'href="{source_url}"' not in page
     assert "123456" in page
     assert "82" in page
     assert "High priority" in page
@@ -632,10 +647,8 @@ def test_batch_drafts_followups_first_and_rolls_over_at_effective_limit(tmp_path
     app.testing = True
     client = app.test_client()
     page = client.get("/today").get_data(as_text=True)
-    assert page.index("Firm 6") < page.index("Firm 1")
-    assert page.index("Firm 7") < page.index("Firm 1")
-    assert 'action="/today/drafts"' in page
-    assert 'name="csrf_token"' in page
+    assert "Email drafts" not in page
+    assert 'action="/today/drafts"' not in page
     with client.session_transaction() as session:
         token = session["csrf_token"]
 
