@@ -2,6 +2,7 @@ import hashlib
 import os
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,17 @@ from govscout.quality import company_verification_is_current
 from tests.support import (
     verified_company_from_test_profile as verified_company_from_profile,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_runbook_requires_database_restore_when_rolling_back_migration_013():
+    runbook = (ROOT / "deploy/production/v1/RUNBOOK.md").read_text(encoding="utf-8")
+    assert "Migration 013 adds append-only archive and restore state" in runbook
+    rollback = runbook.split("## 6. Rollback", maxsplit=1)[1]
+    assert "migration 013" in rollback
+    assert "restore the verified pre-release backup" in rollback
+    assert "Pre-013 code does not enforce archive state" in rollback
 
 
 def _verified(number="12345678", name="Example Governance Ltd"):
