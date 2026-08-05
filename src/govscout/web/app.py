@@ -387,13 +387,12 @@ def create_app(
                     WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
                 )
                 ORDER BY COALESCE(e.score, -1) DESC, f.id
-                LIMIT 50
                 """
             ).fetchall()
-            fca_firms = []
+            research_firms = []
+            review_firms = []
             for row in firm_rows:
-                item = dict(row)
-                item["qc_current"] = bool(
+                qc_current = bool(
                     row["qc_run_id"] is not None
                     and qc_is_current(
                         conn,
@@ -402,6 +401,11 @@ def create_app(
                         now=current,
                     )
                 )
+                target = review_firms if qc_current else research_firms
+                if len(target) >= 50:
+                    continue
+                item = dict(row)
+                item["qc_current"] = qc_current
                 if row["enrichment_run_id"] is None:
                     item["evidence"] = []
                 else:
@@ -416,7 +420,21 @@ def create_app(
                             (row["enrichment_run_id"],),
                         ).fetchall()
                     ]
-                fca_firms.append(item)
+                item["verification_attempts"] = [
+                    dict(attempt)
+                    for attempt in conn.execute(
+                        """
+                        SELECT state, reason_code, checked_at, company_number,
+                               legal_name, legal_form, company_status
+                        FROM company_verification_attempts
+                        WHERE firm_id = ? ORDER BY id DESC LIMIT 10
+                        """,
+                        (row["id"],),
+                    ).fetchall()
+                ]
+                target.append(item)
+                if len(research_firms) >= 50 and len(review_firms) >= 50:
+                    break
         finally:
             conn.close()
         due_candidates = []
@@ -432,7 +450,8 @@ def create_app(
             drafting_locked=drafting_locked,
             csrf_token=session["csrf_token"],
             due_candidates=due_candidates,
-            fca_firms=fca_firms,
+            research_firms=research_firms,
+            review_firms=review_firms,
             auth_enabled=auth is not None,
         )
 

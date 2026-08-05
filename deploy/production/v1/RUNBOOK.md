@@ -41,7 +41,7 @@ Generate a session secret:
 /opt/govscout/current/.venv/bin/python -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(48)).decode())'
 ```
 
-Insert only the username, encoded password hash, and encoded session secret in the env file. Then enforce:
+Insert only the username, encoded password hash, encoded session secret, and the official Companies House API key in the env file. Never place the API key in a command line, log, repository, or ticket. Then enforce:
 
 ```console
 sudo chown root:root /etc/govscout/govscout.env
@@ -69,7 +69,9 @@ sudo cp --preserve=mode,ownership,timestamps /var/lib/govscout/govscout.sqlite3 
 sudo sha256sum /var/backups/govscout/govscout.sqlite3.<UTC-timestamp>
 ```
 
-Record the path and checksum outside the VPS. Startup applies numbered migrations in one SQLite `BEGIN IMMEDIATE` transaction and checksum-verifies all prior migrations. Migration 007 adds persistent login-throttle state. Migration 008 installs FCA identity and canonical-URL guards. Migration 009 adds hashed, revocable collector devices and immutable, payload-bound imports. Treat the verified pre-release database backup as part of the release artefact.
+Record the path and checksum outside the VPS. Startup applies numbered migrations in one SQLite `BEGIN IMMEDIATE` transaction and checksum-verifies all prior migrations. Migration 007 adds persistent login-throttle state. Migration 008 installs FCA identity and canonical-URL guards. Migration 009 adds hashed, revocable collector devices and immutable, payload-bound imports. Migration 010 adds immutable Companies House verification attempts and binds passing QC to a successful attempt for the same FCA firm. Treat the verified pre-release database backup as part of the release artefact.
+
+After migration, FCA-linked leads created through the existing Companies House-verified promotion path are backfilled into the immutable verification history. A backfilled receipt counts as current only when its recorded verification time is no more than 30 days old and its FCA source hash still matches; older or changed records must run `verify-fca <firm-id>` (or `process-fca <firm-id>`) before enrichment/QC. Use `reverify-fca <firm-id>` when fresh evidence is required; each refresh appends history and requires QC to be run again. Do not create placeholder contacts—attach a genuine address separately with `promote-fca-contact` only after legal verification succeeds.
 
 Validate and start:
 

@@ -115,6 +115,20 @@ def _approve_fca_firm(conn, lead_id, *, now):
     firm_id = conn.execute(
         "SELECT id FROM fca_firms WHERE lead_id = ?", (lead_id,)
     ).fetchone()[0]
+    source_hash = conn.execute(
+        "SELECT source_record_hash FROM fca_firms WHERE id = ?", (firm_id,)
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO company_verification_attempts (
+            firm_id, company_number, state, reason_code, checked_at,
+            fca_source_record_hash, legal_name, legal_form, company_status,
+            profile_hash
+        ) VALUES (?, '12345678', 'verified', 'VERIFIED', ?, ?,
+                  'Example Governance Ltd', 'ltd', 'active', ?)
+        """,
+        (firm_id, now.isoformat(), source_hash, "f" * 64),
+    )
 
     class PassingTransport:
         def fetch_html(self, url):

@@ -55,6 +55,7 @@ class FcaApiOpener:
                             "Organisation Name": "Alpha Finance Ltd",
                             "Status": "Authorised",
                             "Business Type": "Regulated",
+                            "Companies House Number": "00123456",
                         }
                     ],
                 }
@@ -134,13 +135,71 @@ def test_official_fca_client_collects_active_firms_into_bounded_govscout_payload
     assert records[0].fca_status == "Authorised"
     assert records[0].website_url == "https://alpha.example/"
     assert records[0].source_location == "London, SW1A 1AA"
-    assert records[0].company_number is None
+    assert records[0].company_number == "00123456"
     assert records[1].frn == "777777"
     assert all(request.method == "GET" for request, _timeout in opener.requests)
     assert all(request.headers["X-auth-email"] == "operator@example.test" for request, _ in opener.requests)
     assert all(request.headers["X-auth-key"] == "secret-api-key" for request, _ in opener.requests)
     assert all("secret-api-key" not in request.full_url for request, _ in opener.requests)
     assert len(delays) == len(opener.requests) - 1
+
+
+@pytest.mark.parametrize(
+    "identity_fields",
+    [
+        {},
+        {"Companies House Number": "not-a-number"},
+        {"Companies House Number": 12345678},
+        {"Mutual Society Number": "12345678"},
+        {
+            "Companies House Number": "12345678",
+            "Mutual Society Number": "MUTUAL-1",
+        },
+    ],
+)
+def test_fca_client_does_not_promote_absent_malformed_or_ambiguous_identity(identity_fields):
+    class Opener:
+        def open(self, request, timeout):
+            path = urlsplit(request.full_url).path
+            if path.endswith("/Search"):
+                return JsonResponse(
+                    {
+                        "Status": "FSR-API-04-01-00",
+                        "Message": "Ok. Search successful",
+                        "Data": [{"Reference Number": "123456"}],
+                    }
+                )
+            if path.endswith("/Address"):
+                return JsonResponse(
+                    {
+                        "Status": "FSR-API-02-02-00",
+                        "Message": "Ok. Address found",
+                        "Data": [],
+                    }
+                )
+            return JsonResponse(
+                {
+                    "Status": "FSR-API-02-01-00",
+                    "Message": "Ok. Firm found",
+                    "Data": [
+                        {
+                            "FRN": "123456",
+                            "Organisation Name": "Alpha Finance Ltd",
+                            "Status": "Authorised",
+                            **identity_fields,
+                        }
+                    ],
+                }
+            )
+
+    payload = FcaRegisterClient(opener=Opener(), sleeper=lambda _seconds: None).collect(
+        search_terms=("finance",),
+        limit=1,
+        email="operator@example.test",
+        api_key="secret-api-key",
+    )
+
+    assert parse_fca_json(payload)[0].company_number is None
 
 
 @pytest.mark.parametrize(

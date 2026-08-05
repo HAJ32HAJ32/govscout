@@ -44,6 +44,86 @@ def _duplicate_snapshot(conn: sqlite3.Connection, firm: sqlite3.Row) -> list[dic
     return [dict(row) for row in rows]
 
 
+def _duplicate_company_snapshot(
+    conn: sqlite3.Connection, firm: sqlite3.Row
+) -> list[dict[str, object]]:
+    if firm["company_number"] is None:
+        return []
+    rows = conn.execute(
+        """
+        SELECT id, frn, firm_name, source_record_hash
+        FROM fca_firms
+        WHERE id <> ? AND is_active = 1 AND company_number = ?
+        ORDER BY id
+        """,
+        (firm["id"], firm["company_number"]),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _latest_company_verification(
+    conn: sqlite3.Connection, firm: sqlite3.Row
+) -> dict[str, object] | None:
+    attempt = conn.execute(
+        """
+        SELECT id, company_number, state, reason_code, checked_at,
+               fca_source_record_hash, legal_name, legal_form,
+               company_status, profile_hash
+        FROM company_verification_attempts
+        WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+        """,
+        (firm["id"],),
+    ).fetchone()
+    return dict(attempt) if attempt is not None else None
+
+
+def _company_verification_reasons(
+    verification: dict[str, object] | None,
+    *,
+    firm: sqlite3.Row,
+    current: datetime,
+) -> set[str]:
+    if verification is None:
+        return {"COMPANIES_HOUSE_VERIFICATION_MISSING"}
+    reasons: set[str] = set()
+    if verification["state"] != "verified":
+        reasons.add("COMPANIES_HOUSE_VERIFICATION_FAILED")
+        return reasons
+    if verification["company_number"] != firm["company_number"]:
+        reasons.add("COMPANIES_HOUSE_COMPANY_MISMATCH")
+    if verification["fca_source_record_hash"] != firm["source_record_hash"]:
+        reasons.add("SOURCE_CHANGED_SINCE_COMPANIES_HOUSE_VERIFICATION")
+    if verification["company_status"] != "active":
+        reasons.add("COMPANIES_HOUSE_NOT_ACTIVE")
+    if verification["legal_form"] not in ALLOWED_LEGAL_FORMS:
+        reasons.add("COMPANIES_HOUSE_LEGAL_FORM_INELIGIBLE")
+    if not verification["profile_hash"]:
+        reasons.add("COMPANIES_HOUSE_VERIFICATION_INVALID")
+    try:
+        verified_at = _utc(str(verification["checked_at"]))
+    except (TypeError, ValueError):
+        reasons.add("COMPANIES_HOUSE_VERIFICATION_INVALID")
+    else:
+        if verified_at > current or current - verified_at > COMPANIES_HOUSE_MAX_AGE:
+            reasons.add("COMPANIES_HOUSE_VERIFICATION_STALE")
+    return reasons
+
+
+def company_verification_is_current(
+    conn: sqlite3.Connection, *, firm_id: int, now: datetime
+) -> bool:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    firm = conn.execute("SELECT * FROM fca_firms WHERE id = ?", (firm_id,)).fetchone()
+    if firm is None:
+        raise KeyError(firm_id)
+    return not _company_verification_reasons(
+        _latest_company_verification(conn, firm),
+        firm=firm,
+        current=now.astimezone(UTC),
+    )
+
+
 def _qc_input_hash(
     conn: sqlite3.Connection,
     firm: sqlite3.Row,
@@ -98,7 +178,9 @@ def _qc_input_hash(
             and conn.execute("SELECT 1 FROM leads WHERE id = ?", (firm["lead_id"],)).fetchone()
             else None
         ),
+        "company_verification": _latest_company_verification(conn, firm),
         "duplicate_websites": _duplicate_snapshot(conn, firm),
+        "duplicate_companies": _duplicate_company_snapshot(conn, firm),
         "enrichment": (
             {field: run[field] for field in run_fields} if run is not None else None
         ),
@@ -149,33 +231,13 @@ def _evaluate_current(
         reasons.add("WEBSITE_MISSING")
     elif _duplicate_snapshot(conn, firm):
         reasons.add("DUPLICATE_WEBSITE")
+    if _duplicate_company_snapshot(conn, firm):
+        reasons.add("DUPLICATE_COMPANY_NUMBER")
 
-    lead = None
-    if firm["lead_id"] is None:
-        reasons.add("LEAD_MISSING")
-    else:
-        lead = conn.execute("SELECT * FROM leads WHERE id = ?", (firm["lead_id"],)).fetchone()
-        if lead is None:
-            reasons.add("LEAD_MISSING")
-    if lead is not None:
-        if lead["company_number"] != firm["company_number"]:
-            reasons.add("COMPANIES_HOUSE_COMPANY_MISMATCH")
-        if lead["company_status"] != "active":
-            reasons.add("COMPANIES_HOUSE_NOT_ACTIVE")
-        if lead["legal_form"] not in ALLOWED_LEGAL_FORMS:
-            reasons.add("COMPANIES_HOUSE_LEGAL_FORM_INELIGIBLE")
-        if (
-            lead["verification_source"] != "companies_house_api"
-            or not lead["companies_house_profile_hash"]
-        ):
-            reasons.add("COMPANIES_HOUSE_VERIFICATION_INVALID")
-        try:
-            verified_at = _utc(lead["companies_house_verified_at"])
-        except (TypeError, ValueError):
-            reasons.add("COMPANIES_HOUSE_VERIFICATION_INVALID")
-        else:
-            if verified_at > current or current - verified_at > COMPANIES_HOUSE_MAX_AGE:
-                reasons.add("COMPANIES_HOUSE_VERIFICATION_STALE")
+    verification = _latest_company_verification(conn, firm)
+    reasons.update(
+        _company_verification_reasons(verification, firm=firm, current=current)
+    )
 
     if run is None:
         reasons.add("SCAN_MISSING")
@@ -225,14 +287,20 @@ def run_qc(conn: sqlite3.Connection, *, firm_id: int, now: datetime) -> QcResult
     passed = not ordered_reasons
     reason_json = json.dumps(ordered_reasons, separators=(",", ":"))
     input_hash = _qc_input_hash(conn, firm, run, evidence)
+    verification = _latest_company_verification(conn, firm)
+    verification_attempt_id = (
+        verification["id"]
+        if verification is not None and verification["state"] == "verified"
+        else None
+    )
     checked = current.isoformat()
     expires = (current + QC_VALIDITY).isoformat()
     qc_run_id = conn.execute(
         """
         INSERT INTO qc_runs (
             firm_id, enrichment_run_id, state, reason_codes,
-            input_hash, checked_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            input_hash, checked_at, expires_at, company_verification_attempt_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             firm_id,
@@ -242,6 +310,7 @@ def run_qc(conn: sqlite3.Connection, *, firm_id: int, now: datetime) -> QcResult
             input_hash,
             checked,
             expires,
+            verification_attempt_id,
         ),
     ).lastrowid
     if qc_run_id is None:
@@ -272,6 +341,14 @@ def qc_is_current(
     firm = conn.execute("SELECT * FROM fca_firms WHERE id = ?", (firm_id,)).fetchone()
     if firm is None:
         return False
+    verification = _latest_company_verification(conn, firm)
+    if (
+        verification is None
+        or verification["state"] != "verified"
+        or verification["id"] is None
+        or verification["id"] != qc["company_verification_attempt_id"]
+    ):
+        return False
     run, evidence = _latest_inputs(conn, firm_id=firm_id)
     if (
         run is None
@@ -299,32 +376,52 @@ def review_firm(
         raise ValueError("decision must be approved or rejected")
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
-    if decision == "approved":
-        if qc_run_id is None or not qc_is_current(
-            conn, firm_id=firm_id, qc_run_id=qc_run_id, now=now
-        ):
-            raise ValueError("approval requires passing current QC")
-        rejection_reason = None
-    elif not rejection_reason or not rejection_reason.strip():
-        raise ValueError("rejection requires a reason")
-    conn.execute(
-        """
-        INSERT INTO firm_reviews (
-            firm_id, decision, qc_run_id, notes, rejection_reason, reviewed_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            firm_id,
-            decision,
-            qc_run_id if decision == "approved" else None,
-            notes.strip() if notes and notes.strip() else None,
-            rejection_reason.strip() if rejection_reason else None,
-            now.astimezone(UTC).isoformat(),
-        ),
-    )
+    if conn.in_transaction:
+        raise sqlite3.OperationalError("firm review requires no active transaction")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if decision == "approved":
+            if qc_run_id is None or not qc_is_current(
+                conn, firm_id=firm_id, qc_run_id=qc_run_id, now=now
+            ):
+                raise ValueError("approval requires passing current QC")
+            rejection_reason = None
+        elif not rejection_reason or not rejection_reason.strip():
+            raise ValueError("rejection requires a reason")
+        conn.execute(
+            """
+            INSERT INTO firm_reviews (
+                firm_id, decision, qc_run_id, notes, rejection_reason, reviewed_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                firm_id,
+                decision,
+                qc_run_id if decision == "approved" else None,
+                notes.strip() if notes and notes.strip() else None,
+                rejection_reason.strip() if rejection_reason else None,
+                now.astimezone(UTC).isoformat(),
+            ),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
 
 
 def is_outreach_ready(conn: sqlite3.Connection, *, firm_id: int, now: datetime) -> bool:
+    firm = conn.execute(
+        """
+        SELECT f.lead_id, l.contact_email
+        FROM fca_firms f
+        LEFT JOIN leads l ON l.id = f.lead_id
+        WHERE f.id = ?
+        """,
+        (firm_id,),
+    ).fetchone()
+    if firm is None or firm["lead_id"] is None or not firm["contact_email"]:
+        return False
     review = conn.execute(
         """
         SELECT decision, qc_run_id FROM firm_reviews

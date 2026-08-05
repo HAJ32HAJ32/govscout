@@ -14,6 +14,7 @@ from govscout.db import (
     insert_verified_lead,
     migrate,
 )
+from govscout.quality import company_verification_is_current
 from tests.support import (
     verified_company_from_test_profile as verified_company_from_profile,
 )
@@ -40,7 +41,7 @@ def _lead(conn, number="12345678"):
     )
 
 
-def _migrate_through_007(conn):
+def _migrate_until(conn, stop_version):
     conn.execute("BEGIN IMMEDIATE")
     conn.execute(
         """
@@ -52,7 +53,7 @@ def _migrate_through_007(conn):
         """
     )
     for version, _name, sql in _migration_texts():
-        if version == "008":
+        if version == stop_version:
             break
         for statement in _statements(sql):
             conn.execute(statement)
@@ -65,6 +66,14 @@ def _migrate_through_007(conn):
             ),
         )
     conn.execute("COMMIT")
+
+
+def _migrate_through_007(conn):
+    _migrate_until(conn, "008")
+
+
+def _migrate_through_009(conn):
+    _migrate_until(conn, "010")
 
 
 def _insert_send_in_state(conn, lead_id, state):
@@ -152,6 +161,7 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         "firm_reviews",
         "collector_devices",
         "collector_imports",
+        "company_verification_attempts",
         "retirement_events",
         "leads",
         "sends",
@@ -169,7 +179,146 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         ("007", 64),
         ("008", 64),
         ("009", 64),
+        ("010", 64),
     ]
+
+
+def test_company_verification_attempts_are_append_only_and_fail_closed(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url, company_number,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example Ltd', 'Authorised', 1, ?, '12345678', ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            "a" * 64,
+            "2026-08-05T08:00:00+00:00",
+            "2026-08-05T08:00:00+00:00",
+        ),
+    ).lastrowid
+    attempt_id = conn.execute(
+        """
+        INSERT INTO company_verification_attempts (
+            firm_id, company_number, state, reason_code, checked_at,
+            fca_source_record_hash, legal_name, legal_form, company_status,
+            profile_hash
+        ) VALUES (?, '12345678', 'verified', 'VERIFIED', ?, ?,
+            'Example Ltd', 'ltd', 'active', ?)
+        """,
+        (
+            firm_id,
+            "2026-08-05T08:01:00+00:00",
+            "a" * 64,
+            "b" * 64,
+        ),
+    ).lastrowid
+    run_id = conn.execute(
+        """
+        INSERT INTO enrichment_runs (
+            firm_id, state, started_at, completed_at, website_url, final_url,
+            input_hash, page_hash, score, temperature
+        ) VALUES (?, 'complete', ?, ?, 'https://example.test/',
+                  'https://example.test/', ?, ?, 0, 'COOL')
+        """,
+        (
+            firm_id,
+            "2026-08-05T08:01:00+00:00",
+            "2026-08-05T08:02:00+00:00",
+            "c" * 64,
+            "d" * 64,
+        ),
+    ).lastrowid
+
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "UPDATE company_verification_attempts SET reason_code = 'CHANGED' WHERE id = ?",
+            (attempt_id,),
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("DELETE FROM company_verification_attempts WHERE id = ?", (attempt_id,))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO company_verification_attempts (
+                firm_id, company_number, state, reason_code, checked_at,
+                fca_source_record_hash
+            ) VALUES (?, '12345678', 'verified', 'VERIFIED', ?, ?)
+            """,
+            (
+                firm_id,
+                "2026-08-05T08:02:00+00:00",
+                "a" * 64,
+            ),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="verification attempt"):
+        conn.execute(
+            """
+            INSERT INTO qc_runs (
+                firm_id, enrichment_run_id, state, reason_codes, input_hash,
+                checked_at, expires_at
+            ) VALUES (?, ?, 'pass', '[]', ?, ?, ?)
+            """,
+            (
+                firm_id,
+                run_id,
+                "e" * 64,
+                "2026-08-05T08:02:00+00:00",
+                "2026-08-06T08:02:00+00:00",
+            ),
+        )
+
+
+def test_migration_010_backfills_prior_verified_lead_with_thirty_day_freshness(
+    tmp_path,
+):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    _migrate_through_009(conn)
+    lead_id = _lead(conn)
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, firm_type, is_active, source_url,
+            website_url, source_location, company_number, source_record_hash,
+            first_seen_at, last_seen_at, lead_id
+        ) VALUES ('123456', 'Example 12345678 Ltd', 'Authorised',
+                  'Regulated firm', 1,
+                  'https://register.fca.org.uk/s/firm?id=123456',
+                  'https://example.test/', 'London', '12345678', ?, ?, ?, ?)
+        """,
+        (
+            "a" * 64,
+            "2026-07-20T09:00:00+00:00",
+            "2026-07-20T09:00:00+00:00",
+            lead_id,
+        ),
+    ).lastrowid
+    assert firm_id is not None
+
+    migrate(conn)
+
+    attempt = conn.execute(
+        """
+        SELECT state, reason_code, checked_at, fca_source_record_hash
+        FROM company_verification_attempts WHERE firm_id = ?
+        """,
+        (firm_id,),
+    ).fetchone()
+    assert tuple(attempt) == (
+        "verified",
+        "VERIFIED",
+        "2026-07-20T09:00:00+00:00",
+        "a" * 64,
+    )
+    assert company_verification_is_current(
+        conn, firm_id=firm_id, now=datetime(2026, 8, 5, 9, tzinfo=UTC)
+    )
+    assert not company_verification_is_current(
+        conn, firm_id=firm_id, now=datetime(2026, 8, 20, 9, tzinfo=UTC)
+    )
 
 
 def test_collector_schema_keeps_device_secrets_hashed_and_imports_durable(tmp_path):

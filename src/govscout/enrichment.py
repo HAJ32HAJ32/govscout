@@ -15,6 +15,7 @@ from urllib.parse import urljoin, urlsplit
 from urllib.request import Request
 
 from govscout.fca_discovery import FcaDataError, canonicalize_website_url
+from govscout.quality import company_verification_is_current
 
 
 SITE_MAX_RESPONSE_BYTES = 512_000
@@ -290,6 +291,8 @@ def run_enrichment(
     ).fetchone()
     if firm is None:
         raise KeyError(firm_id)
+    if not company_verification_is_current(conn, firm_id=firm_id, now=now):
+        raise SiteFetchError("COMPANIES_HOUSE_VERIFICATION_REQUIRED")
     website = firm["website_url"]
     if website is None:
         raise SiteFetchError("WEBSITE_MISSING")

@@ -92,6 +92,91 @@ def test_today_shows_authoritative_counter_and_fail_closed_lint_lock(tmp_path):
     assert "effective hard" not in page
 
 
+def test_today_does_not_hide_review_ready_firm_behind_fifty_research_items(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    for index in range(51):
+        frn = f"{100000 + index}"
+        conn.execute(
+            """
+            INSERT INTO fca_firms (
+                frn, firm_name, fca_status, is_active, source_url,
+                source_record_hash, first_seen_at, last_seen_at
+            ) VALUES (?, ?, 'Authorised', 1, ?, ?, ?, ?)
+            """,
+            (
+                frn,
+                f"Research Firm {index:02d}",
+                f"https://register.fca.org.uk/s/firm?id={frn}",
+                f"{index:064x}",
+                "2026-08-05T09:00:00+00:00",
+                "2026-08-05T09:00:00+00:00",
+            ),
+        )
+    ready_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('200000', 'Ready Review Ltd', 'Authorised', 1, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=200000",
+            "f" * 64,
+            "2026-08-05T09:00:00+00:00",
+            "2026-08-05T09:00:00+00:00",
+        ),
+    ).lastrowid
+    run_id = conn.execute(
+        """
+        INSERT INTO enrichment_runs (
+            firm_id, state, started_at, completed_at, input_hash, score, temperature
+        ) VALUES (?, 'complete', ?, ?, ?, 0, 'COOL')
+        """,
+        (
+            ready_id,
+            "2026-08-05T09:00:00+00:00",
+            "2026-08-05T09:01:00+00:00",
+            "a" * 64,
+        ),
+    ).lastrowid
+    qc_id = conn.execute(
+        """
+        INSERT INTO qc_runs (
+            firm_id, enrichment_run_id, state, reason_codes, input_hash,
+            checked_at, expires_at
+        ) VALUES (?, ?, 'fail', '["TEST"]', ?, ?, ?)
+        """,
+        (
+            ready_id,
+            run_id,
+            "b" * 64,
+            "2026-08-05T09:02:00+00:00",
+            "2026-08-06T09:02:00+00:00",
+        ),
+    ).lastrowid
+    conn.close()
+    monkeypatch.setattr(
+        "govscout.web.app.qc_is_current",
+        lambda _conn, *, firm_id, qc_run_id, now: (
+            firm_id == ready_id and qc_run_id == qc_id
+        ),
+    )
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        now_provider=lambda: datetime(2026, 8, 5, 10, tzinfo=UTC),
+    )
+
+    page = app.test_client().get("/today").get_data(as_text=True)
+
+    assert "Ready Review Ltd" in page
+    assert f'action="/today/review/{ready_id}"' in page
+
+
 def test_today_shows_branded_fca_evidence_score_and_review_controls(tmp_path):
     database = tmp_path / "govscout.sqlite3"
     conn = connect_database(database)
@@ -154,7 +239,7 @@ def test_today_shows_branded_fca_evidence_score_and_review_controls(tmp_path):
     page = app.test_client().get("/today").get_data(as_text=True)
 
     assert "Review possible firms for MISE" in page
-    assert "Firms to review" in page
+    assert "Needs research" in page
     assert "Example Finance Ltd" in page
     assert "London" in page
     assert f'href="{source_url}"' in page
@@ -165,9 +250,9 @@ def test_today_shows_branded_fca_evidence_score_and_review_controls(tmp_path):
     assert "Found" in page
     assert "AI_VISIBLE" not in page
     assert "AI-powered assistant" in page
-    assert 'action="/today/review/1"' in page
+    assert 'action="/today/review/1"' not in page
     assert 'action="/today/draft/' not in page
-    assert '<label>Reason for rejecting<input name="rejection_reason"' in page
+    assert '<label>Reason for rejecting<input name="rejection_reason"' not in page
 
 
 def test_today_does_not_present_expired_qc_as_passing_or_approvable(tmp_path):
@@ -178,14 +263,31 @@ def test_today_does_not_present_expired_qc_as_passing_or_approvable(tmp_path):
         """
         INSERT INTO fca_firms (
             frn, firm_name, fca_status, is_active, source_url,
-            source_record_hash, first_seen_at, last_seen_at
-        ) VALUES ('123456', 'Expired QC Ltd', 'Authorised', 1, ?, ?, ?, ?)
+            company_number, source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Expired QC Ltd', 'Authorised', 1, ?,
+                  '12345678', ?, ?, ?)
         """,
         (
             "https://register.fca.org.uk/s/firm?id=123456",
             "a" * 64,
             "2026-07-01T10:00:00+00:00",
             "2026-07-01T10:00:00+00:00",
+        ),
+    ).lastrowid
+    verification_id = conn.execute(
+        """
+        INSERT INTO company_verification_attempts (
+            firm_id, company_number, state, reason_code, checked_at,
+            fca_source_record_hash, legal_name, legal_form, company_status,
+            profile_hash
+        ) VALUES (?, '12345678', 'verified', 'VERIFIED', ?, ?,
+                  'Expired QC Ltd', 'ltd', 'active', ?)
+        """,
+        (
+            firm_id,
+            "2026-07-01T10:00:00+00:00",
+            "a" * 64,
+            "e" * 64,
         ),
     ).lastrowid
     run_id = conn.execute(
@@ -208,8 +310,8 @@ def test_today_does_not_present_expired_qc_as_passing_or_approvable(tmp_path):
         """
         INSERT INTO qc_runs (
             firm_id, enrichment_run_id, state, reason_codes, input_hash,
-            checked_at, expires_at
-        ) VALUES (?, ?, 'pass', '[]', ?, ?, ?)
+            checked_at, expires_at, company_verification_attempt_id
+        ) VALUES (?, ?, 'pass', '[]', ?, ?, ?, ?)
         """,
         (
             firm_id,
@@ -217,6 +319,7 @@ def test_today_does_not_present_expired_qc_as_passing_or_approvable(tmp_path):
             "d" * 64,
             "2026-07-01T10:02:00+00:00",
             "2026-07-02T10:02:00+00:00",
+            verification_id,
         ),
     )
     conn.close()
@@ -229,12 +332,53 @@ def test_today_does_not_present_expired_qc_as_passing_or_approvable(tmp_path):
     page = app.test_client().get("/today").get_data(as_text=True)
 
     assert "Needs a fresh check" in page
-    assert 'value="approved" disabled aria-describedby="approval-help-1"' in page
-    assert '<p id="approval-help-1"' in page
-    assert "The checks must be current before approval" in page
+    assert 'value="approved"' not in page
+    assert 'action="/today/review/1"' not in page
+    assert "They cannot be approved here" in page
     assert "Checks:</strong>\n            Passed" not in page
-    assert "Company match not available" in page
+    assert "Company number 12345678" in page
     assert "Company not checked yet" not in page
+
+
+def test_today_shows_append_only_companies_house_history_for_research(tmp_path):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url, company_number,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Example Finance Ltd', 'Authorised', 1, ?,
+                  '12345678', ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            "a" * 64,
+            "2026-08-05T10:00:00+00:00",
+            "2026-08-05T10:00:00+00:00",
+        ),
+    ).lastrowid
+    conn.execute(
+        """
+        INSERT INTO company_verification_attempts (
+            firm_id, company_number, state, reason_code, checked_at,
+            fca_source_record_hash
+        ) VALUES (?, '12345678', 'ineligible', 'NAME_MISMATCH', ?, ?)
+        """,
+        (firm_id, "2026-08-05T10:01:00+00:00", "a" * 64),
+    )
+    conn.close()
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+    )
+
+    page = app.test_client().get("/today").get_data(as_text=True)
+
+    assert "Companies House history" in page
+    assert "Ineligible" in page
+    assert "NAME_MISMATCH" in page
 
 
 def test_today_rejection_requires_csrf_and_reason_and_stays_outreach_ineligible(tmp_path):

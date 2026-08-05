@@ -4,9 +4,10 @@ import sqlite3
 import pytest
 
 from govscout.companies_house import CompaniesHouseClient
+from govscout.companies_house_http import CompaniesHouseTransportError
 from govscout.db import connect_database, insert_verified_lead, migrate
 from govscout.fca_discovery import ingest_fca_records, parse_fca_json
-from govscout.fca_pipeline import FcaEligibilityError, verify_and_promote_firm
+from govscout.fca_pipeline import FcaEligibilityError, verify_and_promote_firm, verify_firm
 from tests.support import StubCompaniesHouseTransport
 
 
@@ -67,6 +68,315 @@ def test_active_fca_firm_promotes_only_through_companies_house_receipt(tmp_path)
     ).fetchone()
     assert tuple(row) == ("FCA Financial Services Register", "active")
     assert conn.execute("SELECT lead_id FROM fca_firms").fetchone()[0] == lead_id
+    assert conn.execute(
+        "SELECT count(*) FROM company_verification_attempts WHERE state = 'verified'"
+    ).fetchone()[0] == 1
+
+
+def test_fca_firm_can_be_verified_without_inventing_a_contact(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    transport = StubCompaniesHouseTransport(
+        {
+            "company_number": "12345678",
+            "company_name": "Example Finance Ltd",
+            "company_status": "active",
+            "type": "ltd",
+        }
+    )
+    now = datetime(2026, 8, 5, 9, tzinfo=UTC)
+
+    result = verify_firm(
+        conn,
+        firm_id=firm_id,
+        companies_house=CompaniesHouseClient(transport),
+        now=now,
+    )
+    retry = verify_firm(
+        conn,
+        firm_id=firm_id,
+        companies_house=CompaniesHouseClient(transport),
+        now=now,
+    )
+
+    assert result.verified is True
+    assert retry.attempt_id == result.attempt_id
+    assert transport.requests == ["12345678"]
+    assert conn.execute("SELECT count(*) FROM leads").fetchone()[0] == 0
+    row = conn.execute(
+        "SELECT state, reason_code, legal_name FROM company_verification_attempts"
+    ).fetchone()
+    assert tuple(row) == ("verified", "VERIFIED", "Example Finance Ltd")
+
+
+def test_fca_reverification_appends_a_fresh_immutable_receipt(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    transport = StubCompaniesHouseTransport(
+        {
+            "company_number": "12345678",
+            "company_name": "Example Finance Ltd",
+            "company_status": "active",
+            "type": "ltd",
+        }
+    )
+
+    first = verify_firm(
+        conn,
+        firm_id=firm_id,
+        companies_house=CompaniesHouseClient(transport),
+        now=datetime(2026, 8, 5, 9, tzinfo=UTC),
+    )
+    refreshed = verify_firm(
+        conn,
+        firm_id=firm_id,
+        companies_house=CompaniesHouseClient(transport),
+        now=datetime(2026, 8, 6, 9, tzinfo=UTC),
+        force_refresh=True,
+    )
+
+    assert refreshed.attempt_id != first.attempt_id
+    assert transport.requests == ["12345678", "12345678"]
+    assert conn.execute("SELECT count(*) FROM company_verification_attempts").fetchone()[0] == 2
+
+
+def test_ordinary_verification_does_not_reuse_success_before_newer_failure(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    delegate = CompaniesHouseClient(
+        StubCompaniesHouseTransport(
+            {
+                "company_number": "12345678",
+                "company_name": "Example Finance Ltd",
+                "company_status": "active",
+                "type": "ltd",
+            }
+        )
+    )
+
+    class FailSecondVerification:
+        calls = 0
+
+        def verify_company(self, company_number, *, now):
+            self.calls += 1
+            if self.calls == 2:
+                raise CompaniesHouseTransportError("TEMPORARILY_UNAVAILABLE")
+            return delegate.verify_company(company_number, now=now)
+
+    verifier = FailSecondVerification()
+    first = verify_firm(
+        conn,
+        firm_id=firm_id,
+        companies_house=verifier,
+        now=datetime(2026, 8, 5, 9, tzinfo=UTC),
+    )
+    with pytest.raises(CompaniesHouseTransportError):
+        verify_firm(
+            conn,
+            firm_id=firm_id,
+            companies_house=verifier,
+            now=datetime(2026, 8, 6, 9, tzinfo=UTC),
+            force_refresh=True,
+        )
+
+    recovered = verify_firm(
+        conn,
+        firm_id=firm_id,
+        companies_house=verifier,
+        now=datetime(2026, 8, 6, 10, tzinfo=UTC),
+    )
+
+    assert verifier.calls == 3
+    assert recovered.reused is False
+    assert recovered.attempt_id != first.attempt_id
+    assert [
+        tuple(row)
+        for row in conn.execute(
+            "SELECT state, reason_code FROM company_verification_attempts ORDER BY id"
+        )
+    ] == [
+        ("verified", "VERIFIED"),
+        ("error", "TEMPORARILY_UNAVAILABLE"),
+        ("verified", "VERIFIED"),
+    ]
+
+
+def test_fca_verification_records_name_mismatch_without_creating_a_lead(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+
+    with pytest.raises(FcaEligibilityError, match="name does not match"):
+        verify_firm(
+            conn,
+            firm_id=firm_id,
+            companies_house=CompaniesHouseClient(
+                StubCompaniesHouseTransport(
+                    {
+                        "company_number": "12345678",
+                        "company_name": "Different Finance Ltd",
+                        "company_status": "active",
+                        "type": "ltd",
+                    }
+                )
+            ),
+            now=datetime(2026, 8, 5, 9, tzinfo=UTC),
+        )
+
+    row = conn.execute(
+        "SELECT state, reason_code FROM company_verification_attempts"
+    ).fetchone()
+    assert tuple(row) == ("ineligible", "LEGAL_NAME_MISMATCH")
+
+
+def test_fca_verification_records_sanitised_transport_error(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+
+    class UnsafeErrorVerifier:
+        def verify_company(self, company_number, *, now):
+            raise CompaniesHouseTransportError("key=must-not-be-recorded")
+
+    with pytest.raises(CompaniesHouseTransportError, match="must-not-be-recorded"):
+        verify_firm(
+            conn,
+            firm_id=firm_id,
+            companies_house=UnsafeErrorVerifier(),
+            now=datetime(2026, 8, 5, 9, tzinfo=UTC),
+        )
+
+    assert tuple(
+        conn.execute(
+            "SELECT state, reason_code FROM company_verification_attempts"
+        ).fetchone()
+    ) == ("error", "TRANSPORT_ERROR")
+
+
+def test_contact_promotion_rejects_ambiguous_company_number(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, firm_type, is_active, source_url,
+            website_url, source_location, company_number, source_record_hash,
+            first_seen_at, last_seen_at
+        ) VALUES ('234567', 'Second FCA Identity Ltd', 'Authorised', 'Regulated firm',
+                  1, 'https://register.fca.org.uk/s/firm?id=234567',
+                  'https://second.example.test/', 'London', '12345678', ?, ?, ?)
+        """,
+        (
+            "d" * 64,
+            "2026-08-05T09:00:00+00:00",
+            "2026-08-05T09:00:00+00:00",
+        ),
+    )
+    transport = StubCompaniesHouseTransport(
+        {
+            "company_number": "12345678",
+            "company_name": "Example Finance Ltd",
+            "company_status": "active",
+            "type": "ltd",
+        }
+    )
+
+    with pytest.raises(FcaEligibilityError, match="AMBIGUOUS_COMPANY_NUMBER"):
+        verify_and_promote_firm(
+            conn,
+            firm_id=firm_id,
+            companies_house=CompaniesHouseClient(transport),
+            contact_email="compliance@example.test",
+            now=datetime(2026, 8, 5, 9, tzinfo=UTC),
+        )
+
+    assert transport.requests == []
+    assert conn.execute("SELECT count(*) FROM leads").fetchone()[0] == 0
+
+
+def test_contact_promotion_records_failed_legal_verification(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+
+    with pytest.raises(FcaEligibilityError, match="name does not match"):
+        verify_and_promote_firm(
+            conn,
+            firm_id=firm_id,
+            companies_house=CompaniesHouseClient(
+                StubCompaniesHouseTransport(
+                    {
+                        "company_number": "12345678",
+                        "company_name": "Different Finance Ltd",
+                        "company_status": "active",
+                        "type": "ltd",
+                    }
+                )
+            ),
+            contact_email="compliance@example.test",
+            now=datetime(2026, 8, 5, 9, tzinfo=UTC),
+        )
+
+    assert tuple(
+        conn.execute(
+            "SELECT state, reason_code FROM company_verification_attempts"
+        ).fetchone()
+    ) == ("ineligible", "LEGAL_NAME_MISMATCH")
+    assert conn.execute("SELECT count(*) FROM leads").fetchone()[0] == 0
+
+
+def test_contact_promotion_rechecks_company_number_ambiguity_after_verification(
+    tmp_path,
+):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    delegate = CompaniesHouseClient(
+        StubCompaniesHouseTransport(
+            {
+                "company_number": "12345678",
+                "company_name": "Example Finance Ltd",
+                "company_status": "active",
+                "type": "ltd",
+            }
+        )
+    )
+    concurrent_conn = connect_database(tmp_path / "govscout.sqlite3")
+
+    class DuplicatingVerifier:
+        def verify_company(self, company_number, *, now):
+            company = delegate.verify_company(company_number, now=now)
+            concurrent_conn.execute(
+                """
+                INSERT INTO fca_firms (
+                    frn, firm_name, fca_status, firm_type, is_active, source_url,
+                    website_url, source_location, company_number, source_record_hash,
+                    first_seen_at, last_seen_at
+                ) VALUES ('234567', 'Second FCA Identity Ltd', 'Authorised',
+                          'Regulated firm', 1,
+                          'https://register.fca.org.uk/s/firm?id=234567',
+                          'https://second.example.test/', 'London', '12345678',
+                          ?, ?, ?)
+                """,
+                ("d" * 64, now.isoformat(), now.isoformat()),
+            )
+            return company
+
+    with pytest.raises(FcaEligibilityError, match="AMBIGUOUS_COMPANY_NUMBER"):
+        verify_and_promote_firm(
+            conn,
+            firm_id=firm_id,
+            companies_house=DuplicatingVerifier(),
+            contact_email="compliance@example.test",
+            now=datetime(2026, 8, 5, 9, tzinfo=UTC),
+        )
+
+    concurrent_conn.close()
+    assert conn.execute("SELECT count(*) FROM leads").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(

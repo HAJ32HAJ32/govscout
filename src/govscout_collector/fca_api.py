@@ -23,6 +23,7 @@ FCA_REQUEST_INTERVAL_SECONDS = 1.1
 FCA_RESPONSE_LIMIT_BYTES = 1_000_000
 FCA_MAX_CANDIDATES = 100
 _SUCCESS_STATUS = re.compile(r"^FSR-API-[0-9]{2}-[0-9]{2}-00$")
+_COMPANY_NUMBER = re.compile(r"^[A-Z0-9]{8}$")
 
 
 class FcaApiError(RuntimeError):
@@ -46,6 +47,18 @@ def _required_text(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise FcaApiError(f"FCA response omitted {field}")
     return value.strip()
+
+
+def _company_number_from_firm_details(details: dict[str, object]) -> str | None:
+    """Return only an explicit, unambiguous Companies House identifier."""
+    company_value = details.get("Companies House Number")
+    mutual_value = details.get("Mutual Society Number")
+    if mutual_value not in (None, ""):
+        return None
+    if not isinstance(company_value, str):
+        return None
+    company_number = company_value.strip().upper()
+    return company_number if _COMPANY_NUMBER.fullmatch(company_number) else None
 
 
 class FcaRegisterClient:
@@ -182,7 +195,7 @@ class FcaRegisterClient:
             "source_url": f"{FCA_REGISTER_PAGE}{frn}",
             "website_url": website_url,
             "location": location,
-            "company_number": None,
+            "company_number": _company_number_from_firm_details(details),
         }
 
     def collect(

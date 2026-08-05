@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Protocol
 
 from govscout.auth import create_collector_device, revoke_collector_device
+from govscout.companies_house import CompaniesHouseClient
+from govscout.companies_house_http import (
+    CompaniesHouseHttpTransport,
+    CompaniesHouseTransportError,
+)
 from govscout.config import Settings, load_default_settings, load_settings
 from govscout.db import connect_database, migrate
 from govscout.draft_service import (
@@ -24,6 +29,13 @@ from govscout.fca_discovery import (
     ingest_fca_records,
     parse_fca_json,
 )
+from govscout.fca_pipeline import (
+    CompanyVerifier,
+    FcaEligibilityError,
+    verify_and_promote_firm,
+    verify_firm,
+)
+from govscout.processing import process_firm
 from govscout.quality import run_qc
 from govscout.retirement import create_verified_backup, retire_lca_candidates
 from govscout.sendguard import (
@@ -85,6 +97,23 @@ def build_parser() -> argparse.ArgumentParser:
         "qc-fca", help="run fail-closed quality checks for one FCA firm"
     )
     qc_fca.add_argument("firm_id", type=int)
+    verify_fca = subparsers.add_parser(
+        "verify-fca", help="verify one FCA firm against Companies House"
+    )
+    verify_fca.add_argument("firm_id", type=int)
+    reverify_fca = subparsers.add_parser(
+        "reverify-fca", help="append a fresh Companies House verification"
+    )
+    reverify_fca.add_argument("firm_id", type=int)
+    process_fca = subparsers.add_parser(
+        "process-fca", help="verify, enrich, and quality-check one FCA firm"
+    )
+    process_fca.add_argument("firm_id", type=int)
+    promote_contact = subparsers.add_parser(
+        "promote-fca-contact", help="attach a verified outreach contact to an FCA firm"
+    )
+    promote_contact.add_argument("firm_id", type=int)
+    promote_contact.add_argument("--contact-email", required=True)
     collector_add = subparsers.add_parser(
         "collector-device-add", help="create a scoped collector upload credential"
     )
@@ -125,6 +154,13 @@ def _default_database_path() -> Path:
     )
 
 
+def _default_company_verifier() -> CompanyVerifier:
+    api_key = os.environ.get("GOVSCOUT_COMPANIES_HOUSE_API_KEY", "")
+    if not api_key:
+        raise ValueError("GOVSCOUT_COMPANIES_HOUSE_API_KEY is not configured")
+    return CompaniesHouseClient(CompaniesHouseHttpTransport(api_key=api_key))
+
+
 def _default_dependencies() -> tuple[sqlite3.Connection, SendGuard]:
     settings = _default_settings()
     conn = connect_database(_default_database_path())
@@ -157,6 +193,7 @@ def main(
     draft_service: DraftService | None = None,
     candidate_source: CandidateSource | None = None,
     site_transport: SiteTransport | None = None,
+    company_verifier: CompanyVerifier | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "web":
@@ -283,10 +320,77 @@ def main(
             )
         return 0
 
-    if args.command in {"enrich-fca", "qc-fca"}:
+    if args.command in {
+        "enrich-fca",
+        "qc-fca",
+        "verify-fca",
+        "reverify-fca",
+        "process-fca",
+        "promote-fca-contact",
+    }:
         if conn is None:
             conn = connect_database(_default_database_path())
             migrate(conn)
+        if args.command in {
+            "verify-fca",
+            "reverify-fca",
+            "process-fca",
+            "promote-fca-contact",
+        }:
+            try:
+                verifier = company_verifier or _default_company_verifier()
+                if args.command == "process-fca":
+                    result = process_firm(
+                        conn,
+                        firm_id=args.firm_id,
+                        companies_house=verifier,
+                        site_transport=site_transport or UrlSiteTransport(),
+                        now=current_time,
+                    )
+                    if result.qc.passed:
+                        print(
+                            "FCA processing complete: "
+                            f"verification {result.verification.attempt_id}; "
+                            f"enrichment {result.enrichment.run_id}; "
+                            f"QC pass {result.qc.qc_run_id}"
+                        )
+                        return 0
+                    print(
+                        "FCA processing stopped at QC: "
+                        f"{', '.join(result.qc.reasons)}"
+                    )
+                    return 2
+                if args.command == "promote-fca-contact":
+                    lead_id = verify_and_promote_firm(
+                        conn,
+                        firm_id=args.firm_id,
+                        companies_house=verifier,
+                        contact_email=args.contact_email,
+                        now=current_time,
+                    )
+                    print(f"FCA contact attached: lead {lead_id}")
+                    return 0
+                verification = verify_firm(
+                    conn,
+                    firm_id=args.firm_id,
+                    companies_house=verifier,
+                    now=current_time,
+                    force_refresh=args.command == "reverify-fca",
+                )
+            except (
+                CompaniesHouseTransportError,
+                FcaEligibilityError,
+                KeyError,
+                SiteFetchError,
+                sqlite3.Error,
+                ValueError,
+            ) as exc:
+                print(f"FCA processing failed: {exc}")
+                return 2
+            action = "reverified" if args.command == "reverify-fca" else "verified"
+            suffix = " (current receipt reused)" if verification.reused else ""
+            print(f"FCA firm {action}: attempt {verification.attempt_id}{suffix}")
+            return 0
         if args.command == "enrich-fca":
             try:
                 result = run_enrichment(

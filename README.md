@@ -50,8 +50,12 @@ govscout sends --today
 govscout sends --week
 govscout ingest-fca --input /path/to/fca-export.json --limit 25
 govscout fca-firms --limit 25
+govscout verify-fca <firm-id>
+govscout reverify-fca <firm-id>
+govscout process-fca <firm-id>
 govscout enrich-fca <firm-id>
 govscout qc-fca <firm-id>
+govscout promote-fca-contact <firm-id> --contact-email person@example.com
 govscout collector-device-add --name "H Windows PC"
 govscout collector-device-revoke <device-id>
 govscout draft <lead-id>
@@ -98,7 +102,9 @@ durably queued and auto-uploaded; failed network uploads keep the same idempoten
 The exact authenticated API contract must still be checked against the FCA developer portal during
 private testing; the portal documentation was not accessible from the build environment.
 
-`enrich-fca` scans the staged firm's public HTTPS website through a bounded, no-redirect, public-address-only transport. `qc-fca` checks source freshness, site/enrichment health, duplicate websites, evidence completeness and contradictions. A record remains outreach-ineligible until QC passes and a human approves it in `/today`.
+`verify-fca` checks the explicit FCA Companies House number against the official company-profile API and appends an immutable pass/fail/error receipt. Set `GOVSCOUT_COMPANIES_HOUSE_API_KEY` in the private runtime environment; never place the key in the repository or a command line. `reverify-fca` forces a fresh receipt, while `process-fca` performs the required verification → website enrichment → fail-closed QC sequence for one firm. Verification evidence expires after 30 days, and a fresh receipt invalidates older QC until processing is run again.
+
+`enrich-fca` scans the staged firm's public HTTPS website through a bounded, no-redirect, public-address-only transport. `qc-fca` checks legal-verification freshness, source freshness, site/enrichment health, duplicate websites and company numbers, evidence completeness and contradictions. Legal/entity QC does not invent or imply a contact. `promote-fca-contact` accepts only a genuine operator-supplied email and creates the canonical sendable `leads` record; without it, drafting and sending remain blocked. `/today` keeps incomplete, failed and stale records under **Needs research**, and shows only current QC-passed records under **Firms to review**. Explicit human approval is still required for outreach readiness.
 
 Draft-adjacent commands show the same authoritative capacity counter used by the web application. In the present production configuration, drafting stays locked with `LINT_NOT_READY`.
 
@@ -123,7 +129,7 @@ TS_IP=$(tailscale ip -4)
 govscout web --host "$TS_IP" --port 8766
 ```
 
-GovScout accepts only IP literals in loopback or Tailscale address ranges. Hostnames (including `localhost`), scoped IPv6 addresses, wildcard, LAN and public-IP binds are refused. Requests must also carry a strictly parsed Host header explicitly trusted for that process. `/today` displays the FCA-first evidence and review queue, current scores and QC state, capacity, warnings, lock state and the separate due worklist. Review and draft POST actions are protected by session CSRF tokens; drafting also repeats policy/sendguard checks server-side.
+GovScout accepts only IP literals in loopback or Tailscale address ranges. Hostnames (including `localhost`), scoped IPv6 addresses, wildcard, LAN and public-IP binds are refused. Requests must also carry a strictly parsed Host header explicitly trusted for that process. `/today` displays separate Needs research and Firms to review queues, append-only Companies House verification history, current scores and QC state, capacity, warnings, lock state and the separate due worklist. Review and draft POST actions are protected by session CSRF tokens; drafting also repeats policy/sendguard checks server-side.
 
 A hardened user-service template is provided at `deploy/govscout.service`. Before enabling it on a fresh host, create its private data directory with `install -d -m 700 ~/.local/share/govscout`. On the Mise VPS it runs continuously at `http://100.72.212.14:8766/today`, reachable only from H's tailnet. Tailscale is the access gate; GovScout does not expose this port on the public interface.
 
