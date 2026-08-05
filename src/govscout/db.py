@@ -23,13 +23,12 @@ def connect_database(path: str | Path) -> sqlite3.Connection:
         database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not parent_existed:
             os.chmod(database_path.parent, 0o700)
-        if not database_path.exists():
-            descriptor = os.open(
-                database_path,
-                os.O_CREAT | os.O_EXCL | os.O_RDWR,
-                0o600,
-            )
-            os.close(descriptor)
+        descriptor = os.open(
+            database_path,
+            os.O_CREAT | os.O_RDWR,
+            0o600,
+        )
+        os.close(descriptor)
         os.chmod(database_path, 0o600)
     conn = sqlite3.connect(database_path, timeout=30, isolation_level=None)
     conn.row_factory = sqlite3.Row

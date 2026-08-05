@@ -1,6 +1,8 @@
 import hashlib
 import os
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,6 +32,28 @@ def test_runbook_requires_database_restore_when_rolling_back_migration_013():
     assert "migration 013" in rollback
     assert "restore the verified pre-release backup" in rollback
     assert "Pre-013 code does not enforce archive state" in rollback
+
+
+def test_concurrent_first_database_connections_do_not_race(tmp_path, monkeypatch):
+    database = tmp_path / "first-start.sqlite3"
+    barrier = threading.Barrier(2)
+    original_exists = Path.exists
+
+    def synchronised_exists(path):
+        if path == database:
+            barrier.wait(timeout=5)
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", synchronised_exists)
+
+    def connect_and_close():
+        conn = connect_database(database)
+        conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(connect_and_close) for _ in range(2)]
+    errors = [future.exception() for future in futures]
+    assert errors == [None, None]
 
 
 def _verified(number="12345678", name="Example Governance Ltd"):
