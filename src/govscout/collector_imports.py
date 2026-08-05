@@ -28,6 +28,7 @@ class CollectorImportResult:
 
 @dataclass(frozen=True, slots=True)
 class HistoricalEnqueueResult:
+    eligible_count: int
     enqueued_count: int
 
 
@@ -176,6 +177,7 @@ def enqueue_historical_collector_imports(
     *,
     limit: int,
     now: datetime,
+    dry_run: bool = False,
 ) -> HistoricalEnqueueResult:
     if not 1 <= limit <= 100:
         raise ValueError("historical enqueue limit must be between 1 and 100")
@@ -184,7 +186,9 @@ def enqueue_historical_collector_imports(
     if conn.in_transaction:
         raise sqlite3.OperationalError("historical enqueue requires no active transaction")
     timestamp = now.astimezone(UTC).isoformat()
-    enqueued = 0
+    eligible_count = 0
+    enqueued_count = 0
+    seen: set[tuple[int, str]] = set()
     try:
         conn.execute("BEGIN IMMEDIATE")
         imports = conn.execute(
@@ -199,33 +203,51 @@ def enqueue_historical_collector_imports(
             records = parse_fca_json(imported["payload_json"].encode("utf-8"))
             for record in records:
                 record_hash = fca_record_hash(record)
-                inserted = conn.execute(
+                firm = conn.execute(
                     """
-                    INSERT INTO fca_processing_jobs (
-                        firm_id, import_id, source_record_hash, state, attempt_count,
-                        available_at, created_at, updated_at
-                    )
-                    SELECT id, ?, source_record_hash, 'pending', 0, ?, ?, ?
-                    FROM fca_firms
-                    WHERE frn = ? AND source_record_hash = ?
-                    ON CONFLICT(firm_id, source_record_hash) DO NOTHING
+                    SELECT f.id
+                    FROM fca_firms AS f
+                    WHERE f.frn = ?
+                      AND f.source_record_hash = ?
+                      AND EXISTS (
+                          SELECT 1 FROM fca_observations AS o
+                          WHERE o.firm_id = f.id AND o.source_record_hash = ?
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM fca_processing_jobs AS j
+                          WHERE j.firm_id = f.id AND j.source_record_hash = ?
+                      )
                     """,
-                    (
-                        imported["import_id"],
-                        timestamp,
-                        timestamp,
-                        timestamp,
-                        record.frn,
-                        record_hash,
-                    ),
-                ).rowcount
-                enqueued += inserted
-                if enqueued >= limit:
+                    (record.frn, record_hash, record_hash, record_hash),
+                ).fetchone()
+                if firm is None or (firm["id"], record_hash) in seen:
+                    continue
+                seen.add((firm["id"], record_hash))
+                eligible_count += 1
+                if not dry_run:
+                    enqueued_count += conn.execute(
+                        """
+                        INSERT INTO fca_processing_jobs (
+                            firm_id, import_id, source_record_hash, state,
+                            attempt_count, available_at, created_at, updated_at
+                        ) VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+                        ON CONFLICT(firm_id, source_record_hash) DO NOTHING
+                        """,
+                        (
+                            firm["id"],
+                            imported["import_id"],
+                            record_hash,
+                            timestamp,
+                            timestamp,
+                            timestamp,
+                        ),
+                    ).rowcount
+                if eligible_count >= limit:
                     conn.execute("COMMIT")
-                    return HistoricalEnqueueResult(enqueued)
+                    return HistoricalEnqueueResult(eligible_count, enqueued_count)
         conn.execute("COMMIT")
     except Exception:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
-    return HistoricalEnqueueResult(enqueued)
+    return HistoricalEnqueueResult(eligible_count, enqueued_count)

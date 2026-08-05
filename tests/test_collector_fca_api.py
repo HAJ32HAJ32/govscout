@@ -136,9 +136,7 @@ def test_official_fca_client_collects_active_firms_into_bounded_govscout_payload
     assert records[0].website_url == "https://alpha.example/"
     assert records[0].source_location == "London, SW1A 1AA"
     assert records[0].company_number == "00123456"
-    assert records[0].source_url == (
-        "https://register.fca.org.uk/s/search?q=123456&type=Companies"
-    )
+    assert records[0].source_url == "https://register.fca.org.uk/s/firm?id=123456"
     assert records[1].frn == "777777"
     assert all(request.method == "GET" for request, _timeout in opener.requests)
     assert all(request.headers["X-auth-email"] == "operator@example.test" for request, _ in opener.requests)

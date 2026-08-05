@@ -67,16 +67,31 @@ class ReturningDraftService:
         )
 
 
-def test_today_omits_drafting_presentation_while_drafting_is_locked(tmp_path):
+def test_today_omits_drafting_presentation_without_loading_draft_work(tmp_path, monkeypatch):
     database = tmp_path / "govscout.sqlite3"
     conn = connect_database(database)
     migrate(conn)
     conn.close()
     settings = load_settings(ROOT / "config/default.toml")
+    monkeypatch.setattr(
+        SendGuard,
+        "status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("draft quota was loaded")
+        ),
+    )
+
+    class NoDraftCandidates:
+        def get(self, _lead_id: int) -> ReservationRequest:
+            raise AssertionError("draft candidate was loaded")
+
+        def due(self) -> list[ReservationRequest]:
+            raise AssertionError("draft candidates were loaded")
 
     app = create_app(
         conn_factory=lambda: connect_database(database),
         guard=SendGuard(settings),
+        candidate_source=NoDraftCandidates(),
         now_provider=lambda: datetime(2026, 7, 21, 8, 30, tzinfo=UTC),
     )
     app.testing = True

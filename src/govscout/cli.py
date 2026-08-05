@@ -120,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="enqueue missing jobs from accepted historical Collector imports",
     )
     enqueue_history.add_argument("--limit", type=int, default=25)
+    enqueue_history.add_argument("--dry-run", action="store_true")
     promote_contact = subparsers.add_parser(
         "promote-fca-contact", help="attach a verified outreach contact to an FCA firm"
     )
@@ -363,11 +364,16 @@ def main(
                 conn,
                 limit=args.limit,
                 now=current_time,
+                dry_run=args.dry_run,
             )
         except (FcaDataError, sqlite3.Error, ValueError) as exc:
             print(f"Historical FCA enqueue failed: {exc}")
             return 2
-        print(f"Historical FCA queue: enqueued {result.enqueued_count}")
+        suffix = " (dry run)" if args.dry_run else ""
+        print(
+            f"Historical FCA queue: eligible {result.eligible_count}; "
+            f"enqueued {result.enqueued_count}{suffix}"
+        )
         return 0
 
     if args.command in {

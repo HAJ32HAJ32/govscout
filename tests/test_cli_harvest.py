@@ -74,13 +74,15 @@ def test_cli_enqueues_historical_collector_imports_with_a_bounded_command(tmp_pa
     migrate(conn)
 
     exit_code = main(
-        ["enqueue-fca-history", "--limit", "25"],
+        ["enqueue-fca-history", "--limit", "25", "--dry-run"],
         conn=conn,
         now=datetime(2026, 8, 5, 15, tzinfo=UTC),
     )
 
     assert exit_code == 0
-    assert capsys.readouterr().out.strip() == "Historical FCA queue: enqueued 0"
+    assert capsys.readouterr().out.strip() == (
+        "Historical FCA queue: eligible 0; enqueued 0 (dry run)"
+    )
 
 
 def test_cli_creates_and_revokes_a_scoped_collector_device(tmp_path, capsys):

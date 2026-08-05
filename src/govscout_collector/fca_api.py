@@ -14,7 +14,6 @@ from govscout.fca_discovery import (
     FCA_MAX_RESPONSE_BYTES,
     FcaDataError,
     canonicalize_website_url,
-    fca_register_search_url,
     parse_fca_json,
 )
 
@@ -192,7 +191,7 @@ class FcaRegisterClient:
                 and details["Business Type"].strip()
                 else None
             ),
-            "source_url": fca_register_search_url(frn),
+            "source_url": f"https://register.fca.org.uk/s/firm?id={frn}",
             "website_url": website_url,
             "location": location,
             "company_number": _company_number_from_firm_details(details),
