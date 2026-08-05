@@ -58,9 +58,13 @@ def record_archive_event(
         raise ValueError(f"{action} requires a reason")
     if len(clean_reason) > 500:
         raise ValueError("archive reason must be at most 500 characters")
+    if any(not 32 <= ord(character) <= 126 for character in clean_reason):
+        raise ValueError("archive reason must contain printable ASCII characters only")
     clean_actor = actor.strip()
     if not 1 <= len(clean_actor) <= 100:
         raise ValueError("archive actor must be between 1 and 100 characters")
+    if any(not 32 <= ord(character) <= 126 for character in clean_actor):
+        raise ValueError("archive actor must contain printable ASCII characters only")
     if expected_previous_event_id is not None and expected_previous_event_id <= 0:
         raise ValueError("expected archive event id must be positive")
     if conn.in_transaction:

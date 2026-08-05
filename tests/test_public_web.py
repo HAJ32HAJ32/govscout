@@ -41,6 +41,18 @@ def _public_app(tmp_path, *, max_failures=5):
     return app, database
 
 
+@pytest.mark.parametrize("username", ["a" * 101, "operator\nname", "opérator"])
+def test_authentication_username_matches_audit_actor_contract(username):
+    with pytest.raises(ValueError, match="username"):
+        AuthConfig(
+            username=username,
+            password_hash=hash_password(
+                "test-password", salt=b"0123456789abcdef"
+            ),
+            session_secret=b"s" * 32,
+        )
+
+
 def test_public_mode_protects_data_review_and_draft_routes(tmp_path):
     app, database = _public_app(tmp_path)
     client = app.test_client()

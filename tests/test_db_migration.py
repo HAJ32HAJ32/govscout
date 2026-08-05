@@ -243,6 +243,22 @@ def test_archive_event_schema_enforces_legal_append_only_transitions(tmp_path):
             "2026-08-05T08:00:00+00:00",
         ),
     ).lastrowid
+    invalid_events = (
+        ("\t", "test-operator", "2026-08-05T08:01:00+00:00"),
+        ("Valid reason", "\n", "2026-08-05T08:01:00+00:00"),
+        ("Valid reason", "test-operator", "not-a-timestamp+00:00"),
+    )
+    for reason, actor, occurred_at in invalid_events:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO firm_archive_events (
+                    firm_id, action, reason, actor,
+                    expected_previous_event_id, occurred_at
+                ) VALUES (?, 'archive', ?, ?, NULL, ?)
+                """,
+                (firm_id, reason, actor, occurred_at),
+            )
     with pytest.raises(sqlite3.IntegrityError, match="not archived"):
         conn.execute(
             """

@@ -5,13 +5,24 @@ CREATE TABLE firm_archive_events (
     reason TEXT NOT NULL CHECK (
         length(trim(reason)) BETWEEN 1 AND 500
         AND reason = trim(reason)
+        AND reason NOT GLOB '*[^ -~]*'
     ),
     actor TEXT NOT NULL CHECK (
         length(trim(actor)) BETWEEN 1 AND 100
         AND actor = trim(actor)
+        AND actor NOT GLOB '*[^ -~]*'
     ),
     expected_previous_event_id INTEGER REFERENCES firm_archive_events(id),
-    occurred_at TEXT NOT NULL CHECK (substr(occurred_at, -6) = '+00:00')
+    occurred_at TEXT NOT NULL CHECK (
+        julianday(occurred_at) IS NOT NULL
+        AND strftime('%Y-%m-%dT%H:%M:%S', occurred_at) = substr(occurred_at, 1, 19)
+        AND (
+            occurred_at GLOB
+                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+            OR occurred_at GLOB
+                '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+        )
+    )
 );
 
 CREATE INDEX idx_firm_archive_events_latest
