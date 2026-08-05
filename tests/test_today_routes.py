@@ -358,7 +358,7 @@ def test_research_firm_can_be_archived_and_restored_with_append_only_events(tmp_
         verify.execute("UPDATE firm_archive_events SET action = 'restore' WHERE id = 1")
 
 
-def test_researched_website_is_recorded_then_explicitly_queued(tmp_path):
+def test_researched_website_is_recorded_then_explicitly_queued(tmp_path, monkeypatch):
     database = tmp_path / "govscout.sqlite3"
     conn = connect_database(database)
     migrate(conn)
@@ -383,6 +383,12 @@ def test_researched_website_is_recorded_then_explicitly_queued(tmp_path):
     assert f'action="/today/research/{firm["id"]}/website"' in page
     with client.session_transaction() as browser_session:
         token = browser_session["csrf_token"]
+
+    malformed = client.post(
+        f"/today/research/{firm['id']}/website",
+        data={"csrf_token": token, "action": "assert"},
+    )
+    assert malformed.status_code == 422
 
     missing_csrf = client.post(
         f"/today/research/{firm['id']}/website",
@@ -410,6 +416,12 @@ def test_researched_website_is_recorded_then_explicitly_queued(tmp_path):
     assert "https://official.example.test/" in page
     assert f'action="/today/research/{firm["id"]}/website/reprocess"' in page
 
+    malformed_reprocessing = client.post(
+        f"/today/research/{firm['id']}/website/reprocess",
+        data={"csrf_token": token, "website_evidence_event_id": "1"},
+    )
+    assert malformed_reprocessing.status_code == 422
+
     queued = client.post(
         f"/today/research/{firm['id']}/website/reprocess",
         data={
@@ -430,6 +442,51 @@ def test_researched_website_is_recorded_then_explicitly_queued(tmp_path):
         "assert", "https://official.example.test/", "local-operator"
     )
     assert tuple(job) == ("pending", 1)
+
+    run_id = verify.execute(
+        """
+        INSERT INTO enrichment_runs (
+            firm_id, state, started_at, completed_at, website_url, final_url,
+            input_hash, page_hash, score, temperature,
+            website_evidence_event_id, company_verification_attempt_id
+        ) VALUES (?, 'complete', ?, ?, ?, ?, ?, ?, 50, 'WARM', 1, ?)
+        """,
+        (
+            firm["id"],
+            PROCESSING_NOW.isoformat(),
+            PROCESSING_NOW.isoformat(),
+            "https://official.example.test/",
+            "https://official.example.test/",
+            "b" * 64,
+            "c" * 64,
+            verification.attempt_id,
+        ),
+    ).lastrowid
+    verify.execute(
+        """
+        INSERT INTO qc_runs (
+            firm_id, enrichment_run_id, state, reason_codes, input_hash,
+            checked_at, expires_at, company_verification_attempt_id,
+            website_evidence_event_id
+        ) VALUES (?, ?, 'pass', '[]', ?, ?, ?, ?, 1)
+        """,
+        (
+            firm["id"],
+            run_id,
+            "d" * 64,
+            PROCESSING_NOW.isoformat(),
+            "2026-09-01T10:00:00+00:00",
+            verification.attempt_id,
+        ),
+    )
+    verify.close()
+    monkeypatch.setattr("govscout.web.app.qc_is_current", lambda *_args, **_kwargs: True)
+
+    review_page = client.get("/today").get_data(as_text=True)
+    assert "Firms to review" in review_page
+    assert "Researched official website" in review_page
+    assert "Supporting source" in review_page
+    assert "Why withdraw this website evidence?" in review_page
 
 
 def test_today_does_not_present_expired_qc_as_passing_or_approvable(tmp_path):

@@ -154,6 +154,101 @@ def test_assertion_and_withdrawal_are_append_only_and_stale_fenced(tmp_path):
         conn.execute("UPDATE firm_website_evidence_events SET action = 'assert' WHERE id = ?", (withdrawn,))
 
 
+@pytest.mark.parametrize(
+    "website_url",
+    [
+        "https://example.test/café",
+        "https://" + ".".join(["a" * 63] * 4) + "/",
+        "https://example.test/%zz",
+    ],
+)
+def test_website_assertion_rejects_urls_transport_cannot_process(tmp_path, website_url):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm = _verified_firm(conn)
+
+    with pytest.raises(ValueError, match="website URL"):
+        record_website_evidence(
+            conn,
+            firm_id=firm["id"],
+            action="assert",
+            website_url=website_url,
+            evidence_url="https://register.example.test/source",
+            justification="Official regulator profile links this website.",
+            actor="operator",
+            expected_previous_event_id=None,
+            now=NOW + timedelta(minutes=1),
+        )
+
+
+@pytest.mark.parametrize(
+    ("website_url", "evidence_url"),
+    [
+        ("https://official.example.test/", "https://EXAMPLE.test/source"),
+        ("https://official.example.test/", "https://-bad.example.test/source"),
+        ("https://official.example.test/", "https://example.test:444/source"),
+        ("https://official.example.test/", "https://exämple.test/source"),
+        ("https://official.example.test/", "https://example.test/%zz"),
+        ("https://official.example.test/", "https://example.test/café"),
+        ("https://official.example.test/", "https://" + "a" * 64 + ".test/source"),
+        (
+            "https://official.example.test/",
+            "https://" + ".".join(["a" * 63] * 4) + "/source",
+        ),
+        ("https://example.test/café", "https://register.example.test/source"),
+        ("https://" + "a" * 64 + ".test/", "https://register.example.test/source"),
+        (
+            "https://" + ".".join(["a" * 63] * 4) + "/",
+            "https://register.example.test/source",
+        ),
+    ],
+)
+def test_database_rejects_noncanonical_research_urls(tmp_path, website_url, evidence_url):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm = _verified_firm(conn)
+    asserted = record_website_evidence(
+        conn,
+        firm_id=firm["id"],
+        action="assert",
+        website_url="https://official.example.test/",
+        evidence_url="https://register.example.test/source",
+        justification="Official regulator profile links this website.",
+        actor="operator",
+        expected_previous_event_id=None,
+        now=NOW,
+    )
+    source = conn.execute(
+        """
+        SELECT fca_source_record_hash, collector_import_id
+        FROM firm_website_evidence_events WHERE id = ?
+        """,
+        (asserted,),
+    ).fetchone()
+
+    with pytest.raises(sqlite3.IntegrityError, match="canonical HTTPS"):
+        conn.execute(
+            """
+            INSERT INTO firm_website_evidence_events (
+                firm_id, action, website_url, evidence_url, justification,
+                actor, fca_source_record_hash, collector_import_id,
+                expected_previous_event_id, occurred_at
+            ) VALUES (?, 'assert', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                firm["id"],
+                website_url,
+                evidence_url,
+                "Official regulator profile links this website.",
+                "operator",
+                source["fca_source_record_hash"],
+                source["collector_import_id"],
+                asserted,
+                (NOW + timedelta(minutes=1)).isoformat(),
+            ),
+        )
+
+
 def test_reprocessing_requires_current_verified_identity_and_is_idempotent(tmp_path):
     conn = connect_database(tmp_path / "govscout.sqlite3")
     migrate(conn)

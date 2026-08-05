@@ -34,6 +34,8 @@ class CurrentReprocessingInput:
 
 
 def _printable_ascii(value: str, *, field: str, minimum: int, maximum: int) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} is required and must be text")
     clean = value.strip()
     if not minimum <= len(clean) <= maximum:
         raise ValueError(f"{field} must be between {minimum} and {maximum} characters")
@@ -43,11 +45,13 @@ def _printable_ascii(value: str, *, field: str, minimum: int, maximum: int) -> s
 
 
 def _canonical_url(raw: str, *, field: str, allow_query: bool) -> str:
+    if not isinstance(raw, str):
+        raise ValueError(f"{field} is required and must be text")
     value = raw.strip()
     if not value or len(value) > 2048:
         raise ValueError(f"{field} is required and must be at most 2048 characters")
-    if any(ord(character) <= 32 or ord(character) == 127 for character in value):
-        raise ValueError(f"{field} must not contain control characters")
+    if any(not 33 <= ord(character) <= 126 for character in value):
+        raise ValueError(f"{field} must contain printable ASCII characters only")
     try:
         parsed = urlsplit(value)
         port = parsed.port
@@ -62,6 +66,7 @@ def _canonical_url(raw: str, *, field: str, allow_query: bool) -> str:
         or parsed.fragment
         or (parsed.query and not allow_query)
         or parsed.hostname != parsed.hostname.lower()
+        or len(parsed.hostname) > 253
         or ".." in parsed.hostname
         or parsed.hostname.startswith((".", "-"))
         or parsed.hostname.endswith((".", "-"))
@@ -76,7 +81,14 @@ def _canonical_url(raw: str, *, field: str, allow_query: bool) -> str:
     ):
         raise ValueError(f"{field} must be a canonical HTTPS URL")
     path = parsed.path or "/"
-    if "//" in path or "/./" in path or "/../" in path or path.endswith(("/.", "/..")):
+    if (
+        "%" in value
+        or "\\" in value
+        or "//" in path
+        or "/./" in path
+        or "/../" in path
+        or path.endswith(("/.", "/.."))
+    ):
         raise ValueError(f"{field} path must be canonical")
     canonical = urlunsplit(("https", parsed.hostname, path, parsed.query, ""))
     if field == "website URL" and canonical != value:

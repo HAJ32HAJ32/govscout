@@ -64,6 +64,10 @@ WHEN NOT (
         substr(NEW.website_url, 9), 1,
         instr(substr(NEW.website_url, 9), '/') - 1
     ) NOT GLOB '*[^a-z0-9.-]*'
+    AND length(substr(
+        substr(NEW.website_url, 9), 1,
+        instr(substr(NEW.website_url, 9), '/') - 1
+    )) <= 253
     AND substr(substr(NEW.website_url, 9), 1, 1) NOT IN ('.', '-')
     AND substr(
         substr(NEW.website_url, 9),
@@ -73,6 +77,33 @@ WHEN NOT (
         substr(NEW.website_url, 9), 1,
         instr(substr(NEW.website_url, 9), '/') - 1
     ), '..') = 0
+    AND instr(substr(
+        substr(NEW.website_url, 9), 1,
+        instr(substr(NEW.website_url, 9), '/') - 1
+    ), '.-') = 0
+    AND instr(substr(
+        substr(NEW.website_url, 9), 1,
+        instr(substr(NEW.website_url, 9), '/') - 1
+    ), '-.') = 0
+    AND NOT EXISTS (
+        WITH RECURSIVE labels(label, remainder) AS (
+            SELECT
+                substr(host || '.', 1, instr(host || '.', '.') - 1),
+                substr(host || '.', instr(host || '.', '.') + 1)
+            FROM (
+                SELECT substr(
+                    substr(NEW.website_url, 9), 1,
+                    instr(substr(NEW.website_url, 9), '/') - 1
+                ) AS host
+            )
+            UNION ALL
+            SELECT
+                substr(remainder, 1, instr(remainder || '.', '.') - 1),
+                substr(remainder, instr(remainder || '.', '.') + 1)
+            FROM labels WHERE remainder != ''
+        )
+        SELECT 1 FROM labels WHERE length(label) NOT BETWEEN 1 AND 63
+    )
     AND instr(substr(NEW.website_url, 9), ':') = 0
     AND instr(substr(NEW.website_url, 9), '@') = 0
     AND instr(NEW.website_url, '?') = 0
@@ -80,6 +111,7 @@ WHEN NOT (
     AND instr(NEW.website_url, '%') = 0
     AND instr(NEW.website_url, '\') = 0
     AND instr(NEW.website_url, char(0)) = 0
+    AND length(CAST(NEW.website_url AS BLOB)) = length(NEW.website_url)
     AND NEW.website_url NOT GLOB
         ('*[' || char(1) || '-' || char(32) || char(127) || ']*')
     AND instr(
@@ -98,13 +130,67 @@ WHEN NOT (
     AND substr(NEW.website_url, -3) != '/..'
     AND substr(NEW.evidence_url, 1, 8) = 'https://'
     AND instr(substr(NEW.evidence_url, 9), '/') > 1
+    AND substr(
+        substr(NEW.evidence_url, 9), 1,
+        instr(substr(NEW.evidence_url, 9), '/') - 1
+    ) = lower(substr(
+        substr(NEW.evidence_url, 9), 1,
+        instr(substr(NEW.evidence_url, 9), '/') - 1
+    ))
+    AND length(substr(
+        substr(NEW.evidence_url, 9), 1,
+        instr(substr(NEW.evidence_url, 9), '/') - 1
+    )) <= 253
+    AND substr(
+        substr(NEW.evidence_url, 9), 1,
+        instr(substr(NEW.evidence_url, 9), '/') - 1
+    ) NOT GLOB '*[^a-z0-9.-]*'
+    AND substr(substr(NEW.evidence_url, 9), 1, 1) NOT IN ('.', '-')
+    AND substr(
+        substr(NEW.evidence_url, 9),
+        instr(substr(NEW.evidence_url, 9), '/') - 1, 1
+    ) NOT IN ('.', '-')
+    AND instr(substr(
+        substr(NEW.evidence_url, 9), 1,
+        instr(substr(NEW.evidence_url, 9), '/') - 1
+    ), '..') = 0
+    AND instr(substr(
+        substr(NEW.evidence_url, 9), 1,
+        instr(substr(NEW.evidence_url, 9), '/') - 1
+    ), '.-') = 0
+    AND instr(substr(
+        substr(NEW.evidence_url, 9), 1,
+        instr(substr(NEW.evidence_url, 9), '/') - 1
+    ), '-.') = 0
+    AND NOT EXISTS (
+        WITH RECURSIVE labels(label, remainder) AS (
+            SELECT
+                substr(host || '.', 1, instr(host || '.', '.') - 1),
+                substr(host || '.', instr(host || '.', '.') + 1)
+            FROM (
+                SELECT substr(
+                    substr(NEW.evidence_url, 9), 1,
+                    instr(substr(NEW.evidence_url, 9), '/') - 1
+                ) AS host
+            )
+            UNION ALL
+            SELECT
+                substr(remainder, 1, instr(remainder || '.', '.') - 1),
+                substr(remainder, instr(remainder || '.', '.') + 1)
+            FROM labels WHERE remainder != ''
+        )
+        SELECT 1 FROM labels WHERE length(label) NOT BETWEEN 1 AND 63
+    )
+    AND instr(substr(NEW.evidence_url, 9), ':') = 0
     AND instr(substr(
         substr(NEW.evidence_url, 9), 1,
         instr(substr(NEW.evidence_url, 9), '/') - 1
     ), '@') = 0
     AND instr(NEW.evidence_url, '#') = 0
+    AND instr(NEW.evidence_url, '%') = 0
     AND instr(NEW.evidence_url, '\') = 0
     AND instr(NEW.evidence_url, char(0)) = 0
+    AND length(CAST(NEW.evidence_url AS BLOB)) = length(NEW.evidence_url)
     AND NEW.evidence_url NOT GLOB
         ('*[' || char(1) || '-' || char(32) || char(127) || ']*')
 )
