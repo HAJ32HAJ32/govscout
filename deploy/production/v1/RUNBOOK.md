@@ -103,6 +103,15 @@ sudo systemctl reload caddy
 Run the application health and security probes below before enabling unattended
 processing.
 
+For an upgrade containing the historical-import enqueue command, inspect the bounded preview while the processing timer remains stopped:
+
+```console
+sudo -u govscout GOVSCOUT_DATABASE=/var/lib/govscout/govscout.sqlite3 \
+  /opt/govscout/current/.venv/bin/govscout enqueue-fca-history --limit 25 --dry-run
+```
+
+If the preview succeeds and its eligible count is expected, rerun the same command without `--dry-run`. It appends only missing queue jobs tied to accepted Collector imports; it never rewrites imports, FCA observations or terminal jobs. A malformed accepted payload is a blocker to investigate, not permission to skip history.
+
 ## 5. Health and security probes
 
 The unauthenticated login page is the non-data health probe; all data/review/draft routes remain protected.
