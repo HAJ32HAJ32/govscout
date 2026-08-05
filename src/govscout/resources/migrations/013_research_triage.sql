@@ -6,6 +6,10 @@ CREATE TABLE firm_archive_events (
         length(trim(reason)) BETWEEN 1 AND 500
         AND reason = trim(reason)
     ),
+    actor TEXT NOT NULL CHECK (
+        length(trim(actor)) BETWEEN 1 AND 100
+        AND actor = trim(actor)
+    ),
     expected_previous_event_id INTEGER REFERENCES firm_archive_events(id),
     occurred_at TEXT NOT NULL CHECK (substr(occurred_at, -6) = '+00:00')
 );

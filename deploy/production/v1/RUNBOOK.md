@@ -130,9 +130,14 @@ verify that the timer is active and scheduled:
 
 ```console
 sudo systemctl enable --now govscout-processing.timer
+sudo systemctl start govscout-processing.service
 sudo systemctl is-active govscout-processing.timer
 sudo systemctl list-timers govscout-processing.timer --no-pager
 ```
+
+Starting one bounded worker after the timer is active gives `OnUnitInactiveSec` a
+fresh completion event. Do not accept `active (elapsed)`, `Trigger: n/a`, or a
+blank `NEXT` value as healthy; the timer listing must show a real next run.
 
 For a private Collector device, issue the upload-only token after the migrated release is active:
 

@@ -343,13 +343,13 @@ def test_research_firm_can_be_archived_and_restored_with_append_only_events(tmp_
     verify = connect_database(database)
     events = verify.execute(
         """
-        SELECT action, reason, expected_previous_event_id
+        SELECT action, reason, actor, expected_previous_event_id
         FROM firm_archive_events ORDER BY id
         """
     ).fetchall()
     assert [tuple(row) for row in events] == [
-        ("archive", "Outside the current MISE target market", None),
-        ("restore", "Reconsidering after new information", 1),
+        ("archive", "Outside the current MISE target market", "local-operator", None),
+        ("restore", "Reconsidering after new information", "local-operator", 1),
     ]
     with pytest.raises(Exception):
         verify.execute("UPDATE firm_archive_events SET action = 'restore' WHERE id = 1")

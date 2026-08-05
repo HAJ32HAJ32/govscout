@@ -482,6 +482,7 @@ def create_app(
                 firm_id=firm_id,
                 action=request.form.get("action", ""),
                 reason=request.form.get("reason"),
+                actor=auth.username if auth is not None else "local-operator",
                 expected_previous_event_id=expected_event_id,
                 now=clock(),
             )

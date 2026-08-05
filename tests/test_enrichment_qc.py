@@ -584,8 +584,8 @@ def test_archiving_invalidates_outreach_readiness_and_blocks_review(tmp_path):
     conn.execute(
         """
         INSERT INTO firm_archive_events (
-            firm_id, action, reason, expected_previous_event_id, occurred_at
-        ) VALUES (?, 'archive', 'Outside current target market', NULL, ?)
+            firm_id, action, reason, actor, expected_previous_event_id, occurred_at
+        ) VALUES (?, 'archive', 'Outside current target market', 'test-operator', NULL, ?)
         """,
         (firm_id, NOW.isoformat()),
     )
@@ -612,16 +612,16 @@ def test_restoring_does_not_revive_a_pre_archive_approval(tmp_path):
     archive_id = conn.execute(
         """
         INSERT INTO firm_archive_events (
-            firm_id, action, reason, expected_previous_event_id, occurred_at
-        ) VALUES (?, 'archive', 'Outside current target market', NULL, ?)
+            firm_id, action, reason, actor, expected_previous_event_id, occurred_at
+        ) VALUES (?, 'archive', 'Outside current target market', 'test-operator', NULL, ?)
         """,
         (firm_id, NOW.isoformat()),
     ).lastrowid
     conn.execute(
         """
         INSERT INTO firm_archive_events (
-            firm_id, action, reason, expected_previous_event_id, occurred_at
-        ) VALUES (?, 'restore', 'New information received', ?, ?)
+            firm_id, action, reason, actor, expected_previous_event_id, occurred_at
+        ) VALUES (?, 'restore', 'New information received', 'test-operator', ?, ?)
         """,
         (firm_id, archive_id, (NOW + timedelta(minutes=1)).isoformat()),
     )

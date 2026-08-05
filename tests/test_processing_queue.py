@@ -173,8 +173,8 @@ def test_worker_does_not_claim_an_archived_firm(tmp_path):
     conn.execute(
         """
         INSERT INTO firm_archive_events (
-            firm_id, action, reason, expected_previous_event_id, occurred_at
-        ) VALUES (?, 'archive', 'Outside current target market', NULL, ?)
+            firm_id, action, reason, actor, expected_previous_event_id, occurred_at
+        ) VALUES (?, 'archive', 'Outside current target market', 'test-operator', NULL, ?)
         """,
         (firm_id, NOW.isoformat()),
     )
@@ -207,6 +207,7 @@ def test_archive_refuses_a_firm_while_processing_is_running(tmp_path):
             firm_id=firm_id,
             action="archive",
             reason="Outside current target market",
+            actor="test-operator",
             expected_previous_event_id=None,
             now=NOW + timedelta(seconds=3),
         )

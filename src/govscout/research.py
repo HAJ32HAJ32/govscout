@@ -45,6 +45,7 @@ def record_archive_event(
     firm_id: int,
     action: str,
     reason: str | None,
+    actor: str,
     expected_previous_event_id: int | None,
     now: datetime,
 ) -> int:
@@ -57,6 +58,9 @@ def record_archive_event(
         raise ValueError(f"{action} requires a reason")
     if len(clean_reason) > 500:
         raise ValueError("archive reason must be at most 500 characters")
+    clean_actor = actor.strip()
+    if not 1 <= len(clean_actor) <= 100:
+        raise ValueError("archive actor must be between 1 and 100 characters")
     if expected_previous_event_id is not None and expected_previous_event_id <= 0:
         raise ValueError("expected archive event id must be positive")
     if conn.in_transaction:
@@ -85,13 +89,14 @@ def record_archive_event(
         event_id = conn.execute(
             """
             INSERT INTO firm_archive_events (
-                firm_id, action, reason, expected_previous_event_id, occurred_at
-            ) VALUES (?, ?, ?, ?, ?)
+                firm_id, action, reason, actor, expected_previous_event_id, occurred_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 firm_id,
                 action,
                 clean_reason,
+                clean_actor,
                 expected_previous_event_id,
                 now.astimezone(UTC).isoformat(),
             ),

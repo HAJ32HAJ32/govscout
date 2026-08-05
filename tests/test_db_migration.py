@@ -247,16 +247,16 @@ def test_archive_event_schema_enforces_legal_append_only_transitions(tmp_path):
         conn.execute(
             """
             INSERT INTO firm_archive_events (
-                firm_id, action, reason, expected_previous_event_id, occurred_at
-            ) VALUES (?, 'restore', 'Invalid first action', NULL, ?)
+                firm_id, action, reason, actor, expected_previous_event_id, occurred_at
+            ) VALUES (?, 'restore', 'Invalid first action', 'test-operator', NULL, ?)
             """,
             (firm_id, "2026-08-05T08:01:00+00:00"),
         )
     archive_id = conn.execute(
         """
         INSERT INTO firm_archive_events (
-            firm_id, action, reason, expected_previous_event_id, occurred_at
-        ) VALUES (?, 'archive', 'Outside target market', NULL, ?)
+            firm_id, action, reason, actor, expected_previous_event_id, occurred_at
+        ) VALUES (?, 'archive', 'Outside target market', 'test-operator', NULL, ?)
         """,
         (firm_id, "2026-08-05T08:02:00+00:00"),
     ).lastrowid
@@ -264,8 +264,8 @@ def test_archive_event_schema_enforces_legal_append_only_transitions(tmp_path):
         conn.execute(
             """
             INSERT INTO firm_archive_events (
-                firm_id, action, reason, expected_previous_event_id, occurred_at
-            ) VALUES (?, 'restore', 'Stale browser state', NULL, ?)
+                firm_id, action, reason, actor, expected_previous_event_id, occurred_at
+            ) VALUES (?, 'restore', 'Stale browser state', 'test-operator', NULL, ?)
             """,
             (firm_id, "2026-08-05T08:03:00+00:00"),
         )
@@ -273,8 +273,8 @@ def test_archive_event_schema_enforces_legal_append_only_transitions(tmp_path):
         conn.execute(
             """
             INSERT INTO firm_archive_events (
-                firm_id, action, reason, expected_previous_event_id, occurred_at
-            ) VALUES (?, 'archive', 'Duplicate action', ?, ?)
+                firm_id, action, reason, actor, expected_previous_event_id, occurred_at
+            ) VALUES (?, 'archive', 'Duplicate action', 'test-operator', ?, ?)
             """,
             (firm_id, archive_id, "2026-08-05T08:03:00+00:00"),
         )
