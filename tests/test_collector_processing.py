@@ -5,7 +5,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from govscout.auth import create_collector_device
-from govscout.collector_imports import process_collector_import
+from govscout.collector_imports import (
+    enqueue_historical_collector_imports,
+    process_collector_import,
+)
 from govscout.db import connect_database, migrate
 from govscout.fca_discovery import FcaDataError, ingest_fca_records, parse_fca_json
 
@@ -86,6 +89,50 @@ def test_vps_processing_ingests_a_staged_import_once_without_creating_leads(tmp_
     assert [tuple(row) for row in queued] == [
         ("pending", 0, conn.execute("SELECT source_record_hash FROM fca_firms").fetchone()[0], "123456")
     ]
+
+
+def test_historical_accepted_import_can_be_enqueued_once_with_original_provenance(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    credential = create_collector_device(conn, display_name="H Windows PC", now=NOW)
+    payload = _payload()
+    record = parse_fca_json(payload.encode())[0]
+    ingest_fca_records(conn, (record,), limit=1, now=NOW)
+    conn.execute(
+        """
+        INSERT INTO collector_imports (
+            import_id, device_id, payload_sha256, payload_json, state,
+            received_at, processed_at, result_json
+        ) VALUES (?, ?, ?, ?, 'accepted', ?, ?, ?)
+        """,
+        (
+            "c" * 32,
+            credential.device_id,
+            hashlib.sha256(payload.encode()).hexdigest(),
+            payload,
+            NOW.isoformat(),
+            NOW.isoformat(),
+            json.dumps(
+                {
+                    "source_count": 1,
+                    "staged_count": 1,
+                    "created_count": 1,
+                    "changed_count": 0,
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    )
+
+    first = enqueue_historical_collector_imports(conn, limit=25, now=NOW)
+    second = enqueue_historical_collector_imports(conn, limit=25, now=NOW)
+
+    assert first.enqueued_count == 1
+    assert second.enqueued_count == 0
+    queued = conn.execute(
+        "SELECT import_id, state, attempt_count FROM fca_processing_jobs"
+    ).fetchall()
+    assert [tuple(row) for row in queued] == [("c" * 32, "pending", 0)]
 
 
 def test_rejected_multi_firm_import_rolls_back_records_written_before_stale_record(tmp_path):

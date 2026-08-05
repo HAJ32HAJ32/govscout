@@ -69,6 +69,20 @@ def test_cli_has_no_lca_harvest_command():
     assert "candidates" not in choices
 
 
+def test_cli_enqueues_historical_collector_imports_with_a_bounded_command(tmp_path, capsys):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+
+    exit_code = main(
+        ["enqueue-fca-history", "--limit", "25"],
+        conn=conn,
+        now=datetime(2026, 8, 5, 15, tzinfo=UTC),
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == "Historical FCA queue: enqueued 0"
+
+
 def test_cli_creates_and_revokes_a_scoped_collector_device(tmp_path, capsys):
     database = tmp_path / "govscout.sqlite3"
     conn = connect_database(database)

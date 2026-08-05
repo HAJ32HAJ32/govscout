@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from govscout.auth import create_collector_device, revoke_collector_device
+from govscout.collector_imports import enqueue_historical_collector_imports
 from govscout.companies_house import CompaniesHouseClient
 from govscout.companies_house_http import (
     CompaniesHouseHttpTransport,
@@ -114,6 +115,11 @@ def build_parser() -> argparse.ArgumentParser:
         "process-fca-queue", help="process bounded due FCA jobs"
     )
     process_queue.add_argument("--limit", type=int, default=10)
+    enqueue_history = subparsers.add_parser(
+        "enqueue-fca-history",
+        help="enqueue missing jobs from accepted historical Collector imports",
+    )
+    enqueue_history.add_argument("--limit", type=int, default=25)
     promote_contact = subparsers.add_parser(
         "promote-fca-contact", help="attach a verified outreach contact to an FCA firm"
     )
@@ -346,6 +352,22 @@ def main(
             f"FCA queue: claimed {result.claimed}; succeeded {result.succeeded}; "
             f"failed {result.failed}; retried {result.retried}"
         )
+        return 0
+
+    if args.command == "enqueue-fca-history":
+        if conn is None:
+            conn = connect_database(_default_database_path())
+            migrate(conn)
+        try:
+            result = enqueue_historical_collector_imports(
+                conn,
+                limit=args.limit,
+                now=current_time,
+            )
+        except (FcaDataError, sqlite3.Error, ValueError) as exc:
+            print(f"Historical FCA enqueue failed: {exc}")
+            return 2
+        print(f"Historical FCA queue: enqueued {result.enqueued_count}")
         return 0
 
     if args.command in {

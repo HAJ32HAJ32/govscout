@@ -195,6 +195,10 @@ def _canonical_record(record: FcaFirmRecord) -> str:
     )
 
 
+def fca_record_hash(record: FcaFirmRecord) -> str:
+    return hashlib.sha256(_canonical_record(record).encode()).hexdigest()
+
+
 def _prepare_ingest(
     records: Sequence[FcaFirmRecord],
     *,
@@ -229,7 +233,7 @@ def _write_fca_records(
     changed_count = 0
     for record in selected:
         canonical = _canonical_record(record)
-        record_hash = hashlib.sha256(canonical.encode()).hexdigest()
+        record_hash = fca_record_hash(record)
         existing = conn.execute(
             "SELECT id, source_record_hash, last_seen_at FROM fca_firms WHERE frn = ?",
             (record.frn,),
