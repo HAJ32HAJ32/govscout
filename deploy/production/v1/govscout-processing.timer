@@ -1,0 +1,13 @@
+[Unit]
+Description=Run GovScout FCA processing queue after accepted uploads
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=60s
+AccuracySec=5s
+RandomizedDelaySec=5s
+Persistent=true
+Unit=govscout-processing.service
+
+[Install]
+WantedBy=timers.target

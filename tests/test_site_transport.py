@@ -31,6 +31,7 @@ class Response:
         status=200,
         content_type="text/html; charset=utf-8",
         payload=b"<p>ok</p>",
+        location=None,
     ):
         self.url = url
         self.status = status
@@ -38,6 +39,8 @@ class Response:
         self.headers = Message()
         self.headers["Content-Type"] = content_type
         self.headers["Content-Length"] = str(len(payload))
+        if location is not None:
+            self.headers["Location"] = location
 
     def __enter__(self):
         return self
@@ -131,8 +134,9 @@ def test_site_transport_classifies_http_404_as_not_found():
 
     transport = UrlSiteTransport(opener=opener, resolver=_resolver)
 
-    with pytest.raises(SiteFetchError, match="^NOT_FOUND$"):
+    with pytest.raises(SiteFetchError, match="^NOT_FOUND$") as caught:
         transport.fetch_html(URL)
+    assert caught.value.final_url == URL
 
 
 @pytest.mark.parametrize(
@@ -147,3 +151,74 @@ def test_site_transport_classifies_non_success_response_objects(status, error):
 
     with pytest.raises(SiteFetchError, match=f"^{error}$"):
         transport.fetch_html(URL)
+
+
+def test_site_transport_follows_one_same_origin_https_redirect_and_repins():
+    calls = []
+
+    def resolver(host, _port, *, type):
+        assert host == "example.com"
+        assert type == socket.SOCK_STREAM
+        calls.append(("resolve", host))
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    def opener(request, **_kwargs):
+        calls.append(("open", request.full_url))
+        if request.full_url == URL:
+            return Response(status=301, location="/privacy-policy", payload=b"")
+        return Response(url="https://example.com/privacy-policy")
+
+    page = UrlSiteTransport(
+        opener=opener,
+        resolver=resolver,
+        now_provider=lambda: NOW,
+    ).fetch_html(URL)
+
+    assert page.url == URL
+    assert page.final_url == "https://example.com/privacy-policy"
+    assert calls == [
+        ("resolve", "example.com"),
+        ("open", URL),
+        ("resolve", "example.com"),
+        ("open", "https://example.com/privacy-policy"),
+    ]
+
+
+def test_site_transport_records_final_url_when_redirect_target_is_missing():
+    def opener(request, **_kwargs):
+        if request.full_url == URL:
+            return Response(status=301, location="/privacy-policy", payload=b"")
+        return Response(
+            url="https://example.com/privacy-policy",
+            status=404,
+            payload=b"<p>Not found</p>",
+        )
+
+    transport = UrlSiteTransport(opener=opener, resolver=_resolver)
+
+    with pytest.raises(SiteFetchError, match="^NOT_FOUND$") as caught:
+        transport.fetch_html(URL)
+
+    assert caught.value.final_url == "https://example.com/privacy-policy"
+
+
+def test_site_transport_rejects_cross_origin_redirect_without_resolving_destination():
+    resolved = []
+
+    def resolver(host, _port, *, type):
+        resolved.append(host)
+        return _resolver(host, _port, type=type)
+
+    transport = UrlSiteTransport(
+        opener=lambda _request, **_kwargs: Response(
+            status=302,
+            location="https://attacker.example/privacy",
+            payload=b"",
+        ),
+        resolver=resolver,
+    )
+
+    with pytest.raises(SiteFetchError, match="^REDIRECTED$"):
+        transport.fetch_html(URL)
+
+    assert resolved == ["example.com"]

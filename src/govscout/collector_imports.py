@@ -128,6 +128,26 @@ def process_collector_import(
             sort_keys=True,
             separators=(",", ":"),
         )
+        for record in records:
+            conn.execute(
+                """
+                INSERT INTO fca_processing_jobs (
+                    firm_id, import_id, source_record_hash, state, attempt_count,
+                    available_at, created_at, updated_at
+                )
+                SELECT id, ?, source_record_hash, 'pending', 0, ?, ?, ?
+                FROM fca_firms
+                WHERE frn = ?
+                ON CONFLICT(firm_id, source_record_hash) DO NOTHING
+                """,
+                (
+                    import_id,
+                    processed_at.isoformat(),
+                    processed_at.isoformat(),
+                    processed_at.isoformat(),
+                    record.frn,
+                ),
+            )
         conn.execute(
             """
             UPDATE collector_imports

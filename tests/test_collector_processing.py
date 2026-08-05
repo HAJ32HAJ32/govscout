@@ -76,6 +76,16 @@ def test_vps_processing_ingests_a_staged_import_once_without_creating_leads(tmp_
     assert stored["state"] == "accepted"
     assert json.loads(stored["result_json"])["created_count"] == 1
     assert stored["error_code"] is None
+    queued = conn.execute(
+        """
+        SELECT j.state, j.attempt_count, j.source_record_hash, f.frn
+        FROM fca_processing_jobs AS j
+        JOIN fca_firms AS f ON f.id = j.firm_id
+        """
+    ).fetchall()
+    assert [tuple(row) for row in queued] == [
+        ("pending", 0, conn.execute("SELECT source_record_hash FROM fca_firms").fetchone()[0], "123456")
+    ]
 
 
 def test_rejected_multi_firm_import_rolls_back_records_written_before_stale_record(tmp_path):

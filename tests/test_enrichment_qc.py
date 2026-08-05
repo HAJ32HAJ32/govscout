@@ -146,7 +146,7 @@ def test_pluggable_enrichment_persists_exact_evidence_and_hot_score(tmp_path):
 
     result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
 
-    assert result.score == 100
+    assert result.score == 85
     assert result.temperature == "HOT"
     evidence = conn.execute(
         """
@@ -159,7 +159,7 @@ def test_pluggable_enrichment_persists_exact_evidence_and_hot_score(tmp_path):
         "FCA_REGULATED",
         "AI_VISIBLE",
         "PRIVACY_SILENT_ON_AI",
-        "AI_POLICY_NOT_FOUND",
+        "POLICY_URL_NOT_FOUND",
     }
     assert all(row[3] and row[4] for row in evidence if row[2] == "present")
 
@@ -189,10 +189,160 @@ def test_enrichment_records_honest_unknown_when_privacy_page_cannot_be_checked(t
 
     assert {tuple(row) for row in rows} == {
         ("PRIVACY_SCAN_STATUS", "unknown"),
-        ("CAREERS_SCAN_STATUS", "unknown"),
-        ("POLICY_SCAN_STATUS", "unknown"),
     }
+    known_absences = conn.execute(
+        """
+        SELECT code, evidence_state, excerpt FROM evidence_items
+        WHERE run_id = ? AND code IN ('CAREERS_URL_NOT_FOUND', 'POLICY_URL_NOT_FOUND')
+        ORDER BY code
+        """,
+        (result.run_id,),
+    ).fetchall()
+    assert [tuple(row) for row in known_absences] == [
+        ("CAREERS_URL_NOT_FOUND", "present", "Requested URL returned NOT_FOUND"),
+        ("POLICY_URL_NOT_FOUND", "present", "Requested URL returned NOT_FOUND"),
+    ]
     assert result.temperature == "COOL"
+
+
+def test_enrichment_discovers_same_origin_evidence_links_from_homepage(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+    transport = FakeSiteTransport(
+        {
+            "https://example.test/": """
+                <a href="/privacy-policy">Privacy notice</a>
+                <a href="https://example.test/jobs">Careers</a>
+                <a href="/responsible-ai">Responsible AI</a>
+            """,
+            "https://example.test/privacy-policy": "Privacy and automated decisions.",
+            "https://example.test/jobs": "Join our team using Copilot.",
+            "https://example.test/responsible-ai": "Our AI governance policy.",
+        }
+    )
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    assert transport.urls == [
+        "https://example.test/",
+        "https://example.test/privacy-policy",
+        "https://example.test/jobs",
+        "https://example.test/responsible-ai",
+    ]
+    assert not conn.execute(
+        "SELECT 1 FROM evidence_items WHERE run_id = ? AND evidence_state = 'unknown'",
+        (result.run_id,),
+    ).fetchone()
+
+
+def test_same_origin_home_redirect_is_recorded_and_can_pass_qc(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+
+    class RedirectedHomeTransport(FakeSiteTransport):
+        def fetch_html(self, url):
+            page = super().fetch_html(url)
+            if url == "https://example.test/":
+                return SitePage(
+                    url=url,
+                    final_url="https://example.test/home",
+                    html=page.html,
+                    fetched_at=page.fetched_at,
+                )
+            return page
+
+    transport = RedirectedHomeTransport(
+        {
+            "https://example.test/": "FCA regulated. AI-powered advice.",
+            "https://example.test/privacy": "Privacy and automated decisions.",
+            "https://example.test/careers": "Our team uses Copilot.",
+            "https://example.test/ai-policy": "Our AI governance policy.",
+        }
+    )
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+    stored_final = conn.execute(
+        "SELECT final_url FROM enrichment_runs WHERE id = ?", (result.run_id,)
+    ).fetchone()[0]
+    qc = run_qc(conn, firm_id=firm_id, now=NOW)
+
+    assert stored_final == "https://example.test/home"
+    assert qc.passed
+
+
+def test_auxiliary_redirect_to_home_is_unknown_and_fails_qc(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+
+    class GenericRedirectTransport(FakeSiteTransport):
+        def fetch_html(self, url):
+            page = super().fetch_html(url)
+            if url == "https://example.test/ai-policy":
+                return SitePage(
+                    url=url,
+                    final_url="https://example.test/",
+                    html=self.pages["https://example.test/"],
+                    fetched_at=page.fetched_at,
+                )
+            return page
+
+    transport = GenericRedirectTransport(
+        {
+            "https://example.test/": "FCA regulated. AI-powered advice.",
+            "https://example.test/privacy": "Privacy and automated decisions.",
+            "https://example.test/careers": "Our team uses Copilot.",
+            "https://example.test/ai-policy": "ignored placeholder",
+        }
+    )
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+    policy = conn.execute(
+        """
+        SELECT evidence_state, source_url FROM evidence_items
+        WHERE run_id = ? AND code = 'AI_POLICY_STATUS'
+        """,
+        (result.run_id,),
+    ).fetchone()
+    qc = run_qc(conn, firm_id=firm_id, now=NOW)
+
+    assert tuple(policy) == ("unknown", "https://example.test/")
+    assert not qc.passed
+    assert "EVIDENCE_UNKNOWN" in qc.reasons
+
+
+def test_redirected_not_found_evidence_records_actual_final_url(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+    transport = FakeSiteTransport(
+        {
+            "https://example.test/": "FCA regulated advice.",
+            "https://example.test/privacy": "Privacy and automated decisions.",
+            "https://example.test/careers": "Careers page.",
+            "https://example.test/ai-policy": SiteFetchError(
+                "NOT_FOUND",
+                final_url="https://example.test/responsible-ai",
+            ),
+        }
+    )
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+    source_url = conn.execute(
+        """
+        SELECT source_url FROM evidence_items
+        WHERE run_id = ? AND code = 'POLICY_URL_NOT_FOUND'
+        """,
+        (result.run_id,),
+    ).fetchone()[0]
+
+    assert source_url == "https://example.test/responsible-ai"
 
 
 def test_enrichment_rejects_fca_identity_changed_during_network_fetch(tmp_path):
