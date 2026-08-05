@@ -41,7 +41,7 @@ Generate a session secret:
 /opt/govscout/current/.venv/bin/python -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(48)).decode())'
 ```
 
-Insert only the username, encoded password hash, and encoded session secret in the env file. Then enforce:
+Insert only the username, encoded password hash, encoded session secret, and the official Companies House API key in the env file. Never place the API key in a command line, log, repository, or ticket. Then enforce:
 
 ```console
 sudo chown root:root /etc/govscout/govscout.env
@@ -69,7 +69,9 @@ sudo cp --preserve=mode,ownership,timestamps /var/lib/govscout/govscout.sqlite3 
 sudo sha256sum /var/backups/govscout/govscout.sqlite3.<UTC-timestamp>
 ```
 
-Record the path and checksum outside the VPS. Startup applies numbered migrations in one SQLite `BEGIN IMMEDIATE` transaction and checksum-verifies all prior migrations. Migration 007 adds persistent login-throttle state. Migration 008 installs FCA identity and canonical-URL guards. Migration 009 adds hashed, revocable collector devices and immutable, payload-bound imports. Treat the verified pre-release database backup as part of the release artefact.
+Record the path and checksum outside the VPS. Startup applies numbered migrations in one SQLite `BEGIN IMMEDIATE` transaction and checksum-verifies all prior migrations. Migration 007 adds persistent login-throttle state. Migration 008 installs FCA identity and canonical-URL guards. Migration 009 adds hashed, revocable collector devices and immutable, payload-bound imports. Migration 010 adds immutable Companies House verification attempts and binds passing QC to a successful attempt for the same FCA firm. Treat the verified pre-release database backup as part of the release artefact.
+
+After migration, FCA-linked leads created through the existing Companies House-verified promotion path are backfilled into the immutable verification history. A backfilled receipt counts as current only when its recorded verification time is no more than 30 days old and its FCA source hash still matches; older or changed records must run `verify-fca <firm-id>` (or `process-fca <firm-id>`) before enrichment/QC. Use `reverify-fca <firm-id>` when fresh evidence is required; each refresh appends history and requires QC to be run again. Do not create placeholder contacts—attach a genuine address separately with `promote-fca-contact` only after legal verification succeeds.
 
 Validate and start:
 
@@ -110,10 +112,13 @@ and 100 immutable imports over that credential's lifetime; retries remain payloa
 
 1. Stop GovScout.
 2. Repoint `/opt/govscout/current` to the prior immutable release.
-3. When reverting across migration 008, always move the current database aside
-   and restore the verified pre-release backup, even when no corruption is
-   apparent. The prior application is not approved against migration 008's
-   write-enforcing triggers. Restore owner `govscout:govscout` and mode `0600`.
+3. When reverting across migration 008 or migration 010, always move the current
+   database aside and restore the verified pre-release backup, even when no
+   corruption is apparent. Pre-008 code is not approved against migration 008's
+   write-enforcing triggers. Pre-010 code does not populate
+   `qc_runs.company_verification_attempt_id`, so migration 010's passing-QC
+   trigger will reject its writes. Restore owner `govscout:govscout` and mode
+   `0600`.
 4. Start GovScout, run the probes, and inspect `journalctl -u govscout` and Caddy logs. Never copy an unverified or live-write database over the active file.
 
 ## 7. PC browser-only use

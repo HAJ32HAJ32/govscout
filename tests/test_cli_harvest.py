@@ -2,9 +2,11 @@ import json
 from datetime import UTC, datetime
 
 from govscout.cli import main
-from govscout.db import connect_database, insert_verified_lead, migrate
+from govscout.companies_house import CompaniesHouseClient
+from govscout.db import connect_database, migrate
 from govscout.enrichment import SitePage
-from tests.support import verified_company_from_test_profile
+from govscout.fca_pipeline import verify_and_promote_firm
+from tests.support import StubCompaniesHouseTransport
 
 
 def test_cli_ingests_bounded_fca_export_and_lists_firms_without_creating_leads(
@@ -126,23 +128,22 @@ def test_cli_runs_repeatable_enrichment_and_qc_for_one_fca_firm(tmp_path, capsys
     now = datetime(2026, 7, 25, 14, tzinfo=UTC)
     assert main(["ingest-fca", "--input", str(source)], conn=conn, now=now) == 0
     capsys.readouterr()
-    company = verified_company_from_test_profile(
-        {
-            "company_number": "12345678",
-            "company_name": "Example Finance Ltd",
-            "company_status": "active",
-            "type": "ltd",
-        },
-        now=now,
-    )
-    lead_id = insert_verified_lead(
+    verify_and_promote_firm(
         conn,
-        company=company,
+        firm_id=1,
+        companies_house=CompaniesHouseClient(
+            StubCompaniesHouseTransport(
+                {
+                    "company_number": "12345678",
+                    "company_name": "Example Finance Ltd",
+                    "company_status": "active",
+                    "type": "ltd",
+                }
+            )
+        ),
         contact_email="director@example.test",
-        source_register="FCA Financial Services Register",
         now=now,
     )
-    conn.execute("UPDATE fca_firms SET lead_id = ? WHERE id = 1", (lead_id,))
 
     class SiteTransport:
         def fetch_html(self, url):
@@ -165,6 +166,119 @@ def test_cli_runs_repeatable_enrichment_and_qc_for_one_fca_firm(tmp_path, capsys
     assert "85 HOT" in enrich_output
     assert qc_exit == 0
     assert "QC pass" in qc_output
+
+
+def test_cli_processes_verified_firm_to_qc_without_inventing_contact(tmp_path, capsys):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    source = tmp_path / "fca-export.json"
+    source.write_text(
+        json.dumps(
+            {
+                "firms": [
+                    {
+                        "frn": "123456",
+                        "firm_name": "Example Finance Ltd",
+                        "status": "Authorised",
+                        "firm_type": "Regulated firm",
+                        "source_url": "https://register.fca.org.uk/s/firm?id=123456",
+                        "website_url": "https://example.test/",
+                        "location": "London",
+                        "company_number": "12345678",
+                    }
+                ]
+            }
+        )
+    )
+    now = datetime(2026, 8, 5, 10, tzinfo=UTC)
+    assert main(["ingest-fca", "--input", str(source)], conn=conn, now=now) == 0
+    capsys.readouterr()
+    ch_transport = StubCompaniesHouseTransport(
+        {
+            "company_number": "12345678",
+            "company_name": "Example Finance Ltd",
+            "company_status": "active",
+            "type": "ltd",
+        }
+    )
+
+    class SiteTransport:
+        def fetch_html(self, url):
+            html = {
+                "https://example.test/": "FCA regulated AI-powered advice.",
+                "https://example.test/privacy": "Privacy and automated decisions.",
+                "https://example.test/careers": "We use Copilot.",
+                "https://example.test/ai-policy": "Our AI governance policy.",
+            }[url]
+            return SitePage(url=url, final_url=url, html=html, fetched_at=now)
+
+    exit_code = main(
+        ["process-fca", "1"],
+        conn=conn,
+        now=now,
+        company_verifier=CompaniesHouseClient(ch_transport),
+        site_transport=SiteTransport(),
+    )
+
+    assert exit_code == 0
+    assert "QC pass" in capsys.readouterr().out
+    assert ch_transport.requests == ["12345678"]
+    assert conn.execute("SELECT count(*) FROM company_verification_attempts").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM leads").fetchone()[0] == 0
+    assert conn.execute("SELECT state FROM qc_runs ORDER BY id DESC").fetchone()[0] == "pass"
+
+
+def test_cli_can_add_real_contact_after_legal_verification(tmp_path, capsys):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    source = tmp_path / "fca-export.json"
+    source.write_text(
+        json.dumps(
+            {
+                "firms": [
+                    {
+                        "frn": "123456",
+                        "firm_name": "Example Finance Ltd",
+                        "status": "Authorised",
+                        "source_url": "https://register.fca.org.uk/s/firm?id=123456",
+                        "website_url": "https://example.test/",
+                        "location": "London",
+                        "company_number": "12345678",
+                    }
+                ]
+            }
+        )
+    )
+    now = datetime(2026, 8, 5, 10, tzinfo=UTC)
+    assert main(["ingest-fca", "--input", str(source)], conn=conn, now=now) == 0
+    capsys.readouterr()
+    verifier = CompaniesHouseClient(
+        StubCompaniesHouseTransport(
+            {
+                "company_number": "12345678",
+                "company_name": "Example Finance Ltd",
+                "company_status": "active",
+                "type": "ltd",
+            }
+        )
+    )
+
+    exit_code = main(
+        ["promote-fca-contact", "1", "--contact-email", "compliance@example.test"],
+        conn=conn,
+        now=now,
+        company_verifier=verifier,
+    )
+
+    assert exit_code == 0
+    assert "contact attached" in capsys.readouterr().out.lower()
+    row = conn.execute(
+        """
+        SELECT l.contact_email FROM fca_firms f
+        JOIN leads l ON l.id = f.lead_id WHERE f.id = 1
+        """
+    ).fetchone()
+    assert row[0] == "compliance@example.test"
 
 
 def test_cli_retires_lca_candidates_only_after_creating_verified_backup(

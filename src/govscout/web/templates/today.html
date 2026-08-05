@@ -62,11 +62,74 @@
     </section>
     {% endif %}
 
+    <section class="worklist" aria-labelledby="research-title">
+      <h2 id="research-title">Needs research</h2>
+      <p>These firms are not yet through legal verification, enrichment, and current quality checks. They cannot be approved here.</p>
+      {% if research_firms %}
+        {% for firm in research_firms %}
+        <article class="firm">
+          <div class="firm-head">
+            <div>
+              <h3>{{ firm.firm_name }}</h3>
+              <div class="meta">FCA reference {{ firm.frn }} · {{ firm.fca_status }} · {{ firm.source_location or "Location not found" }}</div>
+              <div class="meta">
+                <a href="{{ firm.source_url }}" target="_blank" rel="noopener noreferrer">View FCA record</a>
+                {% if firm.website_url %} · <a href="{{ firm.website_url }}" target="_blank" rel="noopener noreferrer">Website</a>{% endif %}
+                {% if firm.company_number %} · Company number {{ firm.company_number }}{% else %} · Company match not available{% endif %}
+              </div>
+            </div>
+            <div class="score {{ firm.temperature or 'COOL' }}">
+              <strong>{{ firm.score if firm.score is not none else "—" }}</strong>
+              {% if firm.temperature == "HOT" %}High priority
+              {% elif firm.temperature == "WARM" %}Medium priority
+              {% elif firm.temperature == "COOL" %}Lower priority
+              {% else %}Not scored yet{% endif %}
+            </div>
+          </div>
+          <p><strong>Research state:</strong>
+            {% if firm.qc_state == "pass" %}Needs a fresh check
+            {% elif firm.qc_state %}Checks need attention
+            {% elif firm.enrichment_state %}Checks not run yet
+            {% else %}Legal verification and evidence gathering pending{% endif %}
+          </p>
+          {% if firm.review_decision %}
+          <p><strong>Latest decision:</strong> {{ firm.review_decision|capitalize }}{% if firm.review_notes %} · {{ firm.review_notes }}{% endif %}</p>
+          {% endif %}
+          {% if firm.verification_attempts %}
+          <details>
+            <summary>Companies House history</summary>
+            <ol>
+              {% for attempt in firm.verification_attempts %}
+              <li>{{ attempt.checked_at }} · {{ attempt.state|capitalize }} · {{ attempt.reason_code }}{% if attempt.legal_name %} · {{ attempt.legal_name }}{% endif %}</li>
+              {% endfor %}
+            </ol>
+          </details>
+          {% endif %}
+          {% if firm.qc_reasons and firm.qc_reasons != '[]' %}
+          <details><summary>Why the checks need attention</summary><p>{{ firm.qc_reasons }}</p></details>
+          {% endif %}
+          {% if firm.evidence %}
+          <ul class="evidence">
+            {% for item in firm.evidence %}
+            <li>
+              <strong>{% if item.signal_group == "ai_exposure" %}AI exposure{% else %}{{ item.signal_group|replace('_', ' ')|capitalize }}{% endif %}</strong>
+              <span class="state">{% if item.evidence_state == "present" %}Found{% elif item.evidence_state == "absent" %}Not found{% else %}Could not confirm{% endif %}</span>
+              {% if item.excerpt %}<div>{{ item.excerpt }}</div>{% endif %}
+              {% if item.source_url %}<a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">View source</a>{% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+          {% else %}<p>No website evidence has been gathered yet.</p>{% endif %}
+        </article>
+        {% endfor %}
+      {% else %}<p>No firms need research.</p>{% endif %}
+    </section>
+
     <section class="worklist" aria-labelledby="fca-title">
       <h2 id="fca-title">Firms to review</h2>
       <p>GovScout checks each firm before it can be approved. You stay in control of every decision.</p>
-      {% if fca_firms %}
-        {% for firm in fca_firms %}
+      {% if review_firms %}
+        {% for firm in review_firms %}
         <article class="firm">
           <div class="firm-head">
             <div>
