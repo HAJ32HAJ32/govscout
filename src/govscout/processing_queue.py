@@ -111,8 +111,18 @@ def _claim_next_job(conn: sqlite3.Connection, *, now: datetime) -> _ClaimedJob |
         row = conn.execute(
             """
             SELECT id, firm_id, source_record_hash, attempt_count
-            FROM fca_processing_jobs
+            FROM fca_processing_jobs AS job
             WHERE state = 'pending' AND available_at <= ? AND attempt_count < ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM firm_archive_events AS archive
+                  WHERE archive.id = (
+                      SELECT id FROM firm_archive_events
+                      WHERE firm_id = job.firm_id
+                      ORDER BY id DESC LIMIT 1
+                  )
+                    AND archive.action = 'archive'
+              )
             ORDER BY available_at, id
             LIMIT 1
             """,

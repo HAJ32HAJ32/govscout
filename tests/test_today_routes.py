@@ -270,6 +270,91 @@ def test_today_shows_branded_fca_evidence_score_and_review_controls(tmp_path):
     assert '<label>Reason for rejecting<input name="rejection_reason"' not in page
 
 
+def test_research_firm_can_be_archived_and_restored_with_append_only_events(tmp_path):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Research Firm Ltd', 'Authorised', 1, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            "a" * 64,
+            "2026-08-05T10:00:00+00:00",
+            "2026-08-05T10:00:00+00:00",
+        ),
+    ).lastrowid
+    conn.close()
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        now_provider=lambda: datetime(2026, 8, 5, 11, tzinfo=UTC),
+    )
+    client = app.test_client()
+    page = client.get("/today").get_data(as_text=True)
+    assert f'action="/today/research/{firm_id}/archive"' in page
+    with client.session_transaction() as browser_session:
+        token = browser_session["csrf_token"]
+
+    missing_reason = client.post(
+        f"/today/research/{firm_id}/archive",
+        data={"csrf_token": token, "action": "archive"},
+    )
+    archived = client.post(
+        f"/today/research/{firm_id}/archive",
+        data={
+            "csrf_token": token,
+            "action": "archive",
+            "reason": "Outside the current MISE target market",
+        },
+    )
+
+    assert missing_reason.status_code == 422
+    assert archived.status_code == 303
+    stale_archive = client.post(
+        f"/today/research/{firm_id}/archive",
+        data={
+            "csrf_token": token,
+            "action": "archive",
+            "reason": "Duplicate stale click",
+        },
+    )
+    assert stale_archive.status_code == 409
+    archived_page = client.get("/today").get_data(as_text=True)
+    assert "Archived firms" in archived_page
+    assert "Outside the current MISE target market" in archived_page
+
+    restored = client.post(
+        f"/today/research/{firm_id}/archive",
+        data={
+            "csrf_token": token,
+            "action": "restore",
+            "reason": "Reconsidering after new information",
+            "expected_archive_event_id": "1",
+        },
+    )
+    assert restored.status_code == 303
+    restored_page = client.get("/today").get_data(as_text=True)
+    assert "Outside the current MISE target market" not in restored_page
+    verify = connect_database(database)
+    events = verify.execute(
+        """
+        SELECT action, reason, actor, expected_previous_event_id
+        FROM firm_archive_events ORDER BY id
+        """
+    ).fetchall()
+    assert [tuple(row) for row in events] == [
+        ("archive", "Outside the current MISE target market", "local-operator", None),
+        ("restore", "Reconsidering after new information", "local-operator", 1),
+    ]
+    with pytest.raises(Exception):
+        verify.execute("UPDATE firm_archive_events SET action = 'restore' WHERE id = 1")
+
+
 def test_today_does_not_present_expired_qc_as_passing_or_approvable(tmp_path):
     database = tmp_path / "govscout.sqlite3"
     conn = connect_database(database)

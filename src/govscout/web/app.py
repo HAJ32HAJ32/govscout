@@ -43,6 +43,7 @@ from govscout.fca_discovery import (
     parse_fca_json,
 )
 from govscout.quality import qc_is_current, review_firm
+from govscout.research import ResearchConflict, record_archive_event
 from govscout.sendguard import (
     ReservationConflict,
     ReservationRequest,
@@ -375,7 +376,10 @@ def create_app(
                     q.id AS qc_run_id, q.state AS qc_state,
                     q.reason_codes AS qc_reasons, q.expires_at AS qc_expires_at,
                     r.decision AS review_decision, r.notes AS review_notes,
-                    r.rejection_reason
+                    r.rejection_reason,
+                    t.id AS archive_event_id,
+                    t.action AS archive_action,
+                    t.reason AS archive_reason
                 FROM fca_firms f
                 LEFT JOIN enrichment_runs e ON e.id = (
                     SELECT id FROM enrichment_runs
@@ -389,14 +393,21 @@ def create_app(
                     SELECT id FROM firm_reviews
                     WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
                 )
+                LEFT JOIN firm_archive_events t ON t.id = (
+                    SELECT id FROM firm_archive_events
+                    WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
+                )
                 ORDER BY COALESCE(e.score, -1) DESC, f.id
                 """
             ).fetchall()
             research_firms = []
             review_firms = []
+            archived_firms = []
             for row in firm_rows:
+                archived = row["archive_action"] == "archive"
                 qc_current = bool(
-                    row["qc_run_id"] is not None
+                    not archived
+                    and row["qc_run_id"] is not None
                     and qc_is_current(
                         conn,
                         firm_id=row["id"],
@@ -404,7 +415,10 @@ def create_app(
                         now=current,
                     )
                 )
-                target = review_firms if qc_current else research_firms
+                if archived:
+                    target = archived_firms
+                else:
+                    target = review_firms if qc_current else research_firms
                 if len(target) >= 50:
                     continue
                 item = dict(row)
@@ -437,7 +451,11 @@ def create_app(
                     ).fetchall()
                 ]
                 target.append(item)
-                if len(research_firms) >= 50 and len(review_firms) >= 50:
+                if (
+                    len(research_firms) >= 50
+                    and len(review_firms) >= 50
+                    and len(archived_firms) >= 50
+                ):
                     break
         finally:
             conn.close()
@@ -446,8 +464,35 @@ def create_app(
             csrf_token=session["csrf_token"],
             research_firms=research_firms,
             review_firms=review_firms,
+            archived_firms=archived_firms,
             auth_enabled=auth is not None,
         )
+
+    @app.post("/today/research/<int:firm_id>/archive")
+    def archive_research_firm(firm_id: int):
+        raw_expected = request.form.get("expected_archive_event_id")
+        try:
+            expected_event_id = int(raw_expected) if raw_expected else None
+        except ValueError:
+            return jsonify(error="invalid_archive_event"), 422
+        conn = conn_factory()
+        try:
+            record_archive_event(
+                conn,
+                firm_id=firm_id,
+                action=request.form.get("action", ""),
+                reason=request.form.get("reason"),
+                actor=auth.username if auth is not None else "local-operator",
+                expected_previous_event_id=expected_event_id,
+                now=clock(),
+            )
+        except ResearchConflict as exc:
+            return jsonify(error="archive_conflict", detail=str(exc)), 409
+        except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
+            return jsonify(error="archive_refused", detail=str(exc)), 422
+        finally:
+            conn.close()
+        return redirect(url_for("today"), code=303)
 
     @app.post("/today/review/<int:firm_id>")
     def review_one(firm_id: int):
