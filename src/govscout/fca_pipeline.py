@@ -265,6 +265,19 @@ def verify_and_promote_firm(
         )
         if any(refreshed[field] != firm[field] for field in eligibility_fields):
             raise FcaEligibilityError("FCA eligibility snapshot changed during verification")
+        latest_verification = conn.execute(
+            """
+            SELECT id, state FROM company_verification_attempts
+            WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (firm_id,),
+        ).fetchone()
+        if (
+            latest_verification is None
+            or latest_verification["id"] != verification.attempt_id
+            or latest_verification["state"] != "verified"
+        ):
+            raise FcaEligibilityError("Companies House verification changed during promotion")
         duplicate = conn.execute(
             """
             SELECT id FROM fca_firms

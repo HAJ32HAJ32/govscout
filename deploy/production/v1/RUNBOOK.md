@@ -112,10 +112,13 @@ and 100 immutable imports over that credential's lifetime; retries remain payloa
 
 1. Stop GovScout.
 2. Repoint `/opt/govscout/current` to the prior immutable release.
-3. When reverting across migration 008, always move the current database aside
-   and restore the verified pre-release backup, even when no corruption is
-   apparent. The prior application is not approved against migration 008's
-   write-enforcing triggers. Restore owner `govscout:govscout` and mode `0600`.
+3. When reverting across migration 008 or migration 010, always move the current
+   database aside and restore the verified pre-release backup, even when no
+   corruption is apparent. Pre-008 code is not approved against migration 008's
+   write-enforcing triggers. Pre-010 code does not populate
+   `qc_runs.company_verification_attempt_id`, so migration 010's passing-QC
+   trigger will reject its writes. Restore owner `govscout:govscout` and mode
+   `0600`.
 4. Start GovScout, run the probes, and inspect `journalctl -u govscout` and Caddy logs. Never copy an unverified or live-write database over the active file.
 
 ## 7. PC browser-only use

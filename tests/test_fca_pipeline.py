@@ -3,6 +3,7 @@ import sqlite3
 
 import pytest
 
+import govscout.fca_pipeline as fca_pipeline_module
 from govscout.companies_house import CompaniesHouseClient
 from govscout.companies_house_http import CompaniesHouseTransportError
 from govscout.db import connect_database, insert_verified_lead, migrate
@@ -377,6 +378,64 @@ def test_contact_promotion_rechecks_company_number_ambiguity_after_verification(
 
     concurrent_conn.close()
     assert conn.execute("SELECT count(*) FROM leads").fetchone()[0] == 0
+
+
+def test_contact_promotion_rejects_newer_failed_attempt_after_verification(
+    tmp_path, monkeypatch
+):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    firm_id = _stage(conn)
+    concurrent_conn = connect_database(database)
+    original_verify_firm = fca_pipeline_module.verify_firm
+
+    def verify_then_fail(*args, **kwargs):
+        result = original_verify_firm(*args, **kwargs)
+        concurrent_conn.execute(
+            """
+            INSERT INTO company_verification_attempts (
+                firm_id, company_number, state, reason_code, checked_at,
+                fca_source_record_hash
+            ) VALUES (?, '12345678', 'error', 'TEMPORARILY_UNAVAILABLE', ?, ?)
+            """,
+            (firm_id, kwargs["now"].isoformat(), "a" * 64),
+        )
+        return result
+
+    monkeypatch.setattr(fca_pipeline_module, "verify_firm", verify_then_fail)
+    companies_house = CompaniesHouseClient(
+        StubCompaniesHouseTransport(
+            {
+                "company_number": "12345678",
+                "company_name": "Example Finance Ltd",
+                "company_status": "active",
+                "type": "ltd",
+            }
+        )
+    )
+
+    with pytest.raises(FcaEligibilityError, match="verification changed during promotion"):
+        verify_and_promote_firm(
+            conn,
+            firm_id=firm_id,
+            companies_house=companies_house,
+            contact_email="compliance@example.test",
+            now=datetime(2026, 8, 5, 9, tzinfo=UTC),
+        )
+
+    concurrent_conn.close()
+    assert conn.execute("SELECT count(*) FROM leads").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT lead_id FROM fca_firms WHERE id = ?", (firm_id,)
+    ).fetchone()[0] is None
+    assert conn.execute(
+        """
+        SELECT state FROM company_verification_attempts
+        WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+        """,
+        (firm_id,),
+    ).fetchone()[0] == "error"
 
 
 @pytest.mark.parametrize(
