@@ -14,11 +14,11 @@ from govscout.fca_discovery import (
     FCA_MAX_RESPONSE_BYTES,
     FcaDataError,
     canonicalize_website_url,
+    fca_register_search_url,
     parse_fca_json,
 )
 
 FCA_API_ROOT = "https://register.fca.org.uk/services/V0.1"
-FCA_REGISTER_PAGE = "https://register.fca.org.uk/s/firm?id="
 FCA_REQUEST_INTERVAL_SECONDS = 1.1
 FCA_RESPONSE_LIMIT_BYTES = 1_000_000
 FCA_MAX_CANDIDATES = 100
@@ -192,7 +192,7 @@ class FcaRegisterClient:
                 and details["Business Type"].strip()
                 else None
             ),
-            "source_url": f"{FCA_REGISTER_PAGE}{frn}",
+            "source_url": fca_register_search_url(frn),
             "website_url": website_url,
             "location": location,
             "company_number": _company_number_from_firm_details(details),

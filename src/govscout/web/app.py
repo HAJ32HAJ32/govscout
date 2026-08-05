@@ -37,7 +37,12 @@ from govscout.draft_service import (
     DraftPolicyRefused,
     DraftService,
 )
-from govscout.fca_discovery import FCA_MAX_RESPONSE_BYTES, FcaDataError, parse_fca_json
+from govscout.fca_discovery import (
+    FCA_MAX_RESPONSE_BYTES,
+    FcaDataError,
+    fca_register_search_url,
+    parse_fca_json,
+)
 from govscout.quality import qc_is_current, review_firm
 from govscout.sendguard import (
     ReservationConflict,
@@ -406,6 +411,7 @@ def create_app(
                     continue
                 item = dict(row)
                 item["qc_current"] = qc_current
+                item["fca_register_url"] = fca_register_search_url(row["frn"])
                 if row["enrichment_run_id"] is None:
                     item["evidence"] = []
                 else:

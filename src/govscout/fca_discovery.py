@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 FCA_MAX_RESPONSE_BYTES = 1_000_000
 FCA_MAX_CANONICAL_RECORD_CHARS = 32_768
@@ -63,12 +63,24 @@ def _validate_source_url(value: object, frn: str) -> str:
         and parsed.port is None
         and parsed.username is None
         and parsed.password is None
-        and parsed.path == "/s/firm"
-        and query == {"id": [frn]}
+        and (
+            (parsed.path == "/s/firm" and query == {"id": [frn]})
+            or (
+                parsed.path == "/s/search"
+                and query == {"q": [frn], "type": ["Companies"]}
+            )
+        )
         and not parsed.fragment
     ):
-        raise FcaDataError("source_url must be the matching FCA Register firm page")
+        raise FcaDataError("source_url must be the matching FCA Register firm search")
     return value
+
+
+def fca_register_search_url(frn: str) -> str:
+    if not _FRN.fullmatch(frn):
+        raise ValueError("FRN must contain 6 to 8 digits")
+    query = urlencode({"q": frn, "type": "Companies"})
+    return f"https://{FCA_REGISTER_HOST}/s/search?{query}"
 
 
 def canonicalize_website_url(value: object) -> str | None:
