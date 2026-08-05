@@ -84,9 +84,12 @@ def record_archive_event(
             """
             SELECT 1 FROM fca_processing_jobs
             WHERE firm_id = ? AND state = 'running'
+            UNION ALL
+            SELECT 1 FROM fca_reprocessing_jobs
+            WHERE firm_id = ? AND state = 'running'
             LIMIT 1
             """,
-            (firm_id,),
+            (firm_id, firm_id),
         ).fetchone()
         if running is not None:
             raise ResearchConflict("firm processing is currently running")

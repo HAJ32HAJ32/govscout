@@ -25,13 +25,15 @@ from tests.support import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_runbook_requires_database_restore_when_rolling_back_migration_013():
+def test_runbook_documents_archive_and_website_migration_rollback_boundaries():
     runbook = (ROOT / "deploy/production/v1/RUNBOOK.md").read_text(encoding="utf-8")
     assert "Migration 013 adds append-only archive and restore state" in runbook
+    assert "Migration 014 adds append-only official-website evidence" in runbook
     rollback = runbook.split("## 6. Rollback", maxsplit=1)[1]
     assert "migration 013" in rollback
     assert "restore the verified pre-release backup" in rollback
     assert "Pre-013 code does not enforce archive state" in rollback
+    assert "Pre-014 code does not claim the separate website-reprocessing queue" in rollback
 
 
 def test_concurrent_first_database_connections_do_not_race(tmp_path, monkeypatch):

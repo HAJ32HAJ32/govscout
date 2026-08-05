@@ -185,17 +185,43 @@ CREATE TABLE fca_reprocessing_jobs (
     requested_by TEXT NOT NULL CHECK (
         length(trim(requested_by)) BETWEEN 1 AND 100
         AND requested_by = trim(requested_by)
+        AND instr(requested_by, char(0)) = 0
         AND requested_by NOT GLOB '*[^ -~]*'
     ),
     request_reason TEXT NOT NULL CHECK (
         length(trim(request_reason)) BETWEEN 10 AND 500
         AND request_reason = trim(request_reason)
+        AND instr(request_reason, char(0)) = 0
         AND request_reason NOT GLOB '*[^ -~]*'
     ),
     state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'succeeded', 'failed')),
     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 3),
-    available_at TEXT NOT NULL CHECK (substr(available_at, -6) = '+00:00'),
-    claimed_at TEXT CHECK (claimed_at IS NULL OR substr(claimed_at, -6) = '+00:00'),
+    available_at TEXT NOT NULL CHECK (
+        instr(available_at, char(0)) = 0
+        AND julianday(available_at) IS NOT NULL
+        AND substr(available_at, 12, 2) BETWEEN '00' AND '23'
+        AND substr(available_at, 15, 2) BETWEEN '00' AND '59'
+        AND substr(available_at, 18, 2) BETWEEN '00' AND '59'
+        AND strftime('%Y-%m-%dT%H:%M:%S', available_at) = substr(available_at, 1, 19)
+        AND (
+            available_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+            OR available_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+        )
+    ),
+    claimed_at TEXT CHECK (
+        claimed_at IS NULL OR (
+            instr(claimed_at, char(0)) = 0
+            AND julianday(claimed_at) IS NOT NULL
+            AND substr(claimed_at, 12, 2) BETWEEN '00' AND '23'
+            AND substr(claimed_at, 15, 2) BETWEEN '00' AND '59'
+            AND substr(claimed_at, 18, 2) BETWEEN '00' AND '59'
+            AND strftime('%Y-%m-%dT%H:%M:%S', claimed_at) = substr(claimed_at, 1, 19)
+            AND (
+                claimed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+                OR claimed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+            )
+        )
+    ),
     claim_token TEXT CHECK (
         claim_token IS NULL OR (
             length(claim_token) = 32
@@ -203,7 +229,18 @@ CREATE TABLE fca_reprocessing_jobs (
         )
     ),
     completed_at TEXT CHECK (
-        completed_at IS NULL OR substr(completed_at, -6) = '+00:00'
+        completed_at IS NULL OR (
+            instr(completed_at, char(0)) = 0
+            AND julianday(completed_at) IS NOT NULL
+            AND substr(completed_at, 12, 2) BETWEEN '00' AND '23'
+            AND substr(completed_at, 15, 2) BETWEEN '00' AND '59'
+            AND substr(completed_at, 18, 2) BETWEEN '00' AND '59'
+            AND strftime('%Y-%m-%dT%H:%M:%S', completed_at) = substr(completed_at, 1, 19)
+            AND (
+                completed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+                OR completed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+            )
+        )
     ),
     outcome_code TEXT CHECK (
         outcome_code IS NULL OR (
@@ -212,8 +249,30 @@ CREATE TABLE fca_reprocessing_jobs (
             AND outcome_code NOT GLOB '*[^A-Z0-9_]*'
         )
     ),
-    created_at TEXT NOT NULL CHECK (substr(created_at, -6) = '+00:00'),
-    updated_at TEXT NOT NULL CHECK (substr(updated_at, -6) = '+00:00'),
+    created_at TEXT NOT NULL CHECK (
+        instr(created_at, char(0)) = 0
+        AND julianday(created_at) IS NOT NULL
+        AND substr(created_at, 12, 2) BETWEEN '00' AND '23'
+        AND substr(created_at, 15, 2) BETWEEN '00' AND '59'
+        AND substr(created_at, 18, 2) BETWEEN '00' AND '59'
+        AND strftime('%Y-%m-%dT%H:%M:%S', created_at) = substr(created_at, 1, 19)
+        AND (
+            created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+            OR created_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+        )
+    ),
+    updated_at TEXT NOT NULL CHECK (
+        instr(updated_at, char(0)) = 0
+        AND julianday(updated_at) IS NOT NULL
+        AND substr(updated_at, 12, 2) BETWEEN '00' AND '23'
+        AND substr(updated_at, 15, 2) BETWEEN '00' AND '59'
+        AND substr(updated_at, 18, 2) BETWEEN '00' AND '59'
+        AND strftime('%Y-%m-%dT%H:%M:%S', updated_at) = substr(updated_at, 1, 19)
+        AND (
+            updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+            OR updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+        )
+    ),
     UNIQUE (firm_id, input_hash),
     CHECK (
         (state = 'pending' AND attempt_count < 3 AND claimed_at IS NULL
@@ -303,7 +362,18 @@ CREATE TABLE fca_reprocessing_job_events (
             AND outcome_code NOT GLOB '*[^A-Z0-9_]*'
         )
     ),
-    occurred_at TEXT NOT NULL CHECK (substr(occurred_at, -6) = '+00:00')
+    occurred_at TEXT NOT NULL CHECK (
+        instr(occurred_at, char(0)) = 0
+        AND julianday(occurred_at) IS NOT NULL
+        AND substr(occurred_at, 12, 2) BETWEEN '00' AND '23'
+        AND substr(occurred_at, 15, 2) BETWEEN '00' AND '59'
+        AND substr(occurred_at, 18, 2) BETWEEN '00' AND '59'
+        AND strftime('%Y-%m-%dT%H:%M:%S', occurred_at) = substr(occurred_at, 1, 19)
+        AND (
+            occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+            OR occurred_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+        )
+    )
 );
 
 CREATE INDEX idx_fca_reprocessing_job_events_job
@@ -343,6 +413,16 @@ CREATE TRIGGER fca_reprocessing_jobs_no_delete
 BEFORE DELETE ON fca_reprocessing_jobs
 BEGIN
     SELECT RAISE(ABORT, 'reprocessing jobs cannot be deleted');
+END;
+
+CREATE TRIGGER firm_archive_events_no_running_reprocessing
+BEFORE INSERT ON firm_archive_events
+WHEN NEW.action = 'archive' AND EXISTS (
+    SELECT 1 FROM fca_reprocessing_jobs
+    WHERE firm_id = NEW.firm_id AND state = 'running'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'cannot archive while reprocessing is running');
 END;
 
 CREATE TRIGGER fca_reprocessing_jobs_record_insert
