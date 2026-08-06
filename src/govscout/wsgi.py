@@ -13,6 +13,7 @@ from govscout.db import connect_database, migrate
 from govscout.sendguard import SendGuard
 from govscout.web.app import create_app
 from govscout.web_hosts import canonical_safe_bind_host
+from govscout.website_candidates import SearxngWebsiteCandidateProvider
 
 
 def _required(environment: Mapping[str, str], name: str) -> str:
@@ -60,6 +61,10 @@ def create_production_app(environment: Mapping[str, str] | None = None) -> Flask
     database = Path(_required(env, "GOVSCOUT_DATABASE"))
     settings_path = env.get("GOVSCOUT_CONFIG")
     settings = load_settings(settings_path) if settings_path else load_default_settings()
+    search_endpoint = env.get("GOVSCOUT_SEARCH_ENDPOINT")
+    website_candidate_provider = (
+        SearxngWebsiteCandidateProvider(search_endpoint) if search_endpoint else None
+    )
 
     setup = connect_database(database)
     try:
@@ -72,6 +77,7 @@ def create_production_app(environment: Mapping[str, str] | None = None) -> Flask
         guard=SendGuard(settings),
         trusted_hosts=(canonical_bind,),
         auth=auth,
+        website_candidate_provider=website_candidate_provider,
     )
 
 

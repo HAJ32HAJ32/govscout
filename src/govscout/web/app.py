@@ -46,8 +46,15 @@ from govscout.quality import qc_is_current, review_firm
 from govscout.research import ResearchConflict, record_archive_event
 from govscout.website_research import (
     WebsiteResearchConflict,
+    confirm_website_and_enqueue,
     enqueue_website_reprocessing,
     record_website_evidence,
+)
+from govscout.website_candidates import (
+    WebsiteCandidateProvider,
+    candidate_urls_are_safe,
+    discover_website_candidates,
+    load_confirmable_candidate,
 )
 from govscout.sendguard import (
     ReservationConflict,
@@ -92,6 +99,7 @@ def create_app(
     csrf_secret: bytes | str | None = None,
     trusted_hosts: tuple[str, ...] = (),
     auth: AuthConfig | None = None,
+    website_candidate_provider: WebsiteCandidateProvider | None = None,
 ) -> Flask:
     app = Flask(__name__)
     app.request_class = GovScoutRequest
@@ -471,6 +479,32 @@ def create_app(
                         (row["id"],),
                     ).fetchall()
                 ]
+                latest_candidate_search = conn.execute(
+                    """
+                    SELECT id FROM website_candidate_searches
+                    WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+                    """,
+                    (row["id"],),
+                ).fetchone()
+                item["website_candidates"] = (
+                    []
+                    if latest_candidate_search is None
+                    else [
+                        dict(candidate)
+                        for candidate in conn.execute(
+                            """
+                            SELECT id, rank, website_url, source_url, title, snippet
+                            FROM website_candidates
+                            WHERE search_id = ? ORDER BY rank
+                            """,
+                            (latest_candidate_search["id"],),
+                        ).fetchall()
+                        if candidate_urls_are_safe(
+                            website_url=candidate["website_url"],
+                            source_url=candidate["source_url"],
+                        )
+                    ]
+                )
                 target.append(item)
                 if (
                     len(research_firms) >= 50
@@ -486,6 +520,7 @@ def create_app(
             research_firms=research_firms,
             review_firms=review_firms,
             archived_firms=archived_firms,
+            candidate_search_enabled=website_candidate_provider is not None,
             auth_enabled=auth is not None,
         )
 
@@ -539,6 +574,85 @@ def create_app(
             return jsonify(error="website_evidence_conflict", detail=str(exc)), 409
         except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
             return jsonify(error="website_evidence_refused", detail=str(exc)), 422
+        finally:
+            conn.close()
+        return redirect(url_for("today"), code=303)
+
+    @app.post("/today/research/<int:firm_id>/website/confirm")
+    def confirm_researched_website(firm_id: int):
+        raw_expected = request.form.get("expected_website_evidence_event_id")
+        try:
+            expected_event_id = int(raw_expected) if raw_expected else None
+        except ValueError:
+            return jsonify(error="invalid_website_evidence_event"), 422
+        conn = conn_factory()
+        try:
+            confirm_website_and_enqueue(
+                conn,
+                firm_id=firm_id,
+                website_url=request.form.get("website_url"),
+                evidence_url=request.form.get("evidence_url"),
+                justification=request.form.get("justification"),
+                actor=auth.username if auth is not None else "local-operator",
+                expected_previous_event_id=expected_event_id,
+                request_reason="Confirmed official website through the research workbench.",
+                now=clock(),
+            )
+        except WebsiteResearchConflict as exc:
+            return jsonify(error="website_confirmation_conflict", detail=str(exc)), 409
+        except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
+            return jsonify(error="website_confirmation_refused", detail=str(exc)), 422
+        finally:
+            conn.close()
+        return redirect(url_for("today"), code=303)
+
+    @app.post("/today/research/<int:firm_id>/website/candidates")
+    def find_website_candidates(firm_id: int):
+        if website_candidate_provider is None:
+            return jsonify(error="website_candidate_search_unavailable"), 503
+        conn = conn_factory()
+        try:
+            discover_website_candidates(
+                conn,
+                firm_id=firm_id,
+                provider=website_candidate_provider,
+                now=clock(),
+            )
+        except WebsiteResearchConflict as exc:
+            return jsonify(error="website_candidate_search_refused", detail=str(exc)), 409
+        except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
+            return jsonify(error="website_candidate_search_invalid", detail=str(exc)), 422
+        finally:
+            conn.close()
+        return redirect(url_for("today"), code=303)
+
+    @app.post("/today/research/<int:firm_id>/website/candidates/<int:candidate_id>/confirm")
+    def confirm_website_candidate(firm_id: int, candidate_id: int):
+        raw_expected = request.form.get("expected_website_evidence_event_id", "")
+        try:
+            expected_previous = int(raw_expected) if raw_expected else None
+        except ValueError:
+            return jsonify(error="invalid_website_evidence_event_id"), 422
+        conn = conn_factory()
+        try:
+            candidate = load_confirmable_candidate(
+                conn, firm_id=firm_id, candidate_id=candidate_id
+            )
+            confirm_website_and_enqueue(
+                conn,
+                firm_id=firm_id,
+                website_url=candidate["website_url"],
+                evidence_url=candidate["source_url"],
+                justification="Operator confirmed this candidate as the firm's official website.",
+                actor=auth.username if auth is not None else "local-operator",
+                expected_previous_event_id=expected_previous,
+                request_reason="Confirmed suggested website through the research workbench.",
+                now=clock(),
+            )
+        except WebsiteResearchConflict as exc:
+            return jsonify(error="website_candidate_conflict", detail=str(exc)), 409
+        except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
+            return jsonify(error="website_candidate_refused", detail=str(exc)), 422
         finally:
             conn.close()
         return redirect(url_for("today"), code=303)

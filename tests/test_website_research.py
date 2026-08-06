@@ -10,6 +10,7 @@ from govscout.processing_queue import _claim_next_job, _record_outcome, run_pend
 from govscout.research import ResearchConflict, record_archive_event
 from govscout.website_research import (
     WebsiteResearchConflict,
+    confirm_website_and_enqueue,
     enqueue_website_reprocessing,
     record_website_evidence,
 )
@@ -322,6 +323,30 @@ def test_reprocessing_requires_current_verified_identity_and_is_idempotent(tmp_p
     assert second.job_id == first.job_id
     assert conn.execute("SELECT count(*) FROM fca_processing_jobs").fetchone()[0] == 1
     assert conn.execute("SELECT count(*) FROM fca_reprocessing_jobs").fetchone()[0] == 1
+
+
+def test_confirm_website_and_enqueue_rolls_back_both_when_identity_is_stale(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm = _verified_firm(conn)
+
+    with pytest.raises(WebsiteResearchConflict, match="stale"):
+        confirm_website_and_enqueue(
+            conn,
+            firm_id=firm["id"],
+            website_url="https://official.example.test/",
+            evidence_url="https://official.example.test/legal",
+            justification="The legal page identifies the regulated company by name.",
+            actor="local-operator",
+            expected_previous_event_id=None,
+            request_reason="Confirm the website and run bounded checks.",
+            now=NOW + timedelta(days=31),
+        )
+
+    assert conn.execute(
+        "SELECT count(*) FROM firm_website_evidence_events"
+    ).fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM fca_reprocessing_jobs").fetchone()[0] == 0
 
 
 def test_database_rejects_fabricated_reprocessing_history(tmp_path):

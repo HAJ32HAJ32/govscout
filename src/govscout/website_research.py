@@ -120,10 +120,10 @@ def record_website_evidence(
     clean_actor = _printable_ascii(actor, field="website evidence actor", minimum=1, maximum=100)
     if expected_previous_event_id is not None and expected_previous_event_id <= 0:
         raise ValueError("expected website evidence event id must be positive")
-    if conn.in_transaction:
-        raise sqlite3.OperationalError("website evidence action requires no active transaction")
+    owns_transaction = not conn.in_transaction
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         firm = conn.execute(
             "SELECT source_record_hash FROM fca_firms WHERE id = ?", (firm_id,)
         ).fetchone()
@@ -179,9 +179,10 @@ def record_website_evidence(
                 now.astimezone(UTC).isoformat(),
             ),
         ).lastrowid
-        conn.execute("COMMIT")
+        if owns_transaction:
+            conn.execute("COMMIT")
     except Exception:
-        if conn.in_transaction:
+        if owns_transaction and conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
     if event_id is None:
@@ -255,10 +256,10 @@ def enqueue_website_reprocessing(
         request_reason, field="reprocessing reason", minimum=10, maximum=500
     )
     now_utc = now.astimezone(UTC)
-    if conn.in_transaction:
-        raise sqlite3.OperationalError("reprocessing enqueue requires no active transaction")
+    owns_transaction = not conn.in_transaction
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         firm = conn.execute(
             "SELECT * FROM fca_firms WHERE id = ?", (firm_id,)
         ).fetchone()
@@ -367,12 +368,57 @@ def enqueue_website_reprocessing(
         ).fetchone()
         if row is None:
             raise RuntimeError("reprocessing job insert was not observable")
+        if owns_transaction:
+            conn.execute("COMMIT")
+    except Exception:
+        if owns_transaction and conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    return ReprocessingRequest(int(row["id"]), input_hash, created)
+
+
+def confirm_website_and_enqueue(
+    conn: sqlite3.Connection,
+    *,
+    firm_id: int,
+    website_url: str,
+    evidence_url: str,
+    justification: str,
+    actor: str,
+    expected_previous_event_id: int | None,
+    request_reason: str,
+    now: datetime,
+) -> ReprocessingRequest:
+    """Atomically assert one website and queue its bounded enrichment/QC checks."""
+    if conn.in_transaction:
+        raise sqlite3.OperationalError("website confirmation requires no active transaction")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        evidence_event_id = record_website_evidence(
+            conn,
+            firm_id=firm_id,
+            action="assert",
+            website_url=website_url,
+            evidence_url=evidence_url,
+            justification=justification,
+            actor=actor,
+            expected_previous_event_id=expected_previous_event_id,
+            now=now,
+        )
+        request = enqueue_website_reprocessing(
+            conn,
+            firm_id=firm_id,
+            expected_website_evidence_event_id=evidence_event_id,
+            requested_by=actor,
+            request_reason=request_reason,
+            now=now,
+        )
         conn.execute("COMMIT")
     except Exception:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
-    return ReprocessingRequest(int(row["id"]), input_hash, created)
+    return request
 
 
 def load_current_reprocessing_input(

@@ -217,6 +217,8 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         "firm_website_evidence_events",
         "fca_reprocessing_jobs",
         "fca_reprocessing_job_events",
+        "website_candidate_searches",
+        "website_candidates",
         "retirement_events",
         "leads",
         "sends",
@@ -239,6 +241,7 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         ("012", 64),
         ("013", 64),
         ("014", 64),
+        ("015", 64),
     ]
 
 

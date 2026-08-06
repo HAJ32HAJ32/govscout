@@ -115,22 +115,34 @@
           <p><strong>Justification:</strong> {{ firm.website_justification }}</p>
           <p><strong>Reprocessing:</strong> {{ firm.reprocessing_state or "Not requested" }}{% if firm.reprocessing_outcome %} · {{ firm.reprocessing_outcome }}{% endif %}</p>
           {% endif %}
-          <form class="review" action="/today/research/{{ firm.id }}/website" method="post">
+          {% if firm.website_evidence_action != "assert" %}
+          {% if candidate_search_enabled %}
+          <form class="review" action="/today/research/{{ firm.id }}/website/candidates" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="approve" type="submit">Find likely websites</button>
+          </form>
+          {% endif %}
+          {% for candidate in firm.website_candidates %}
+          <section class="evidence" aria-label="Suggested website">
+            <p><strong>Suggested website:</strong> <a href="{{ candidate.website_url }}" target="_blank" rel="noopener noreferrer">{{ candidate.website_url }}</a></p>
+            <p>{{ candidate.title }}{% if candidate.snippet %} · {{ candidate.snippet }}{% endif %}</p>
+            <form class="review" action="/today/research/{{ firm.id }}/website/candidates/{{ candidate.id }}/confirm" method="post">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id or '' }}">
+              <button class="approve" type="submit">Confirm this website and run checks</button>
+            </form>
+          </section>
+          {% endfor %}
+          <form class="review" action="/today/research/{{ firm.id }}/website/confirm" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id or '' }}">
-            <input type="hidden" name="action" value="assert">
-            <label>Official website URL<input name="website_url" type="url" required maxlength="2048" value="{{ firm.researched_website_url if firm.website_evidence_action == 'assert' else '' }}"></label>
-            <label>Evidence/source URL<input name="evidence_url" type="url" required maxlength="2048" value="{{ firm.website_evidence_url if firm.website_evidence_action == 'assert' else '' }}"></label>
-            <label class="wide">Why this proves it is the official website<textarea name="justification" rows="2" required maxlength="1000">{{ firm.website_justification if firm.website_evidence_action == 'assert' else '' }}</textarea></label>
-            <button class="approve" type="submit">Record website evidence</button>
+            <label>Official website URL<input name="website_url" type="url" required maxlength="2048"></label>
+            <label>Where did you confirm it?<input name="evidence_url" type="url" required maxlength="2048"></label>
+            <label class="wide">Why this is the official website<textarea name="justification" rows="2" required maxlength="1000"></textarea></label>
+            <button class="approve" type="submit">Confirm website and run checks</button>
           </form>
+          {% endif %}
           {% if firm.website_evidence_action == "assert" %}
-          <form class="review" action="/today/research/{{ firm.id }}/website/reprocess" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="website_evidence_event_id" value="{{ firm.website_evidence_event_id }}">
-            <label class="wide">Why reprocess now?<input name="request_reason" required maxlength="500"></label>
-            <button class="approve" type="submit">Request reprocessing</button>
-          </form>
           <form class="review" action="/today/research/{{ firm.id }}/website" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id }}">
