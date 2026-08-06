@@ -359,6 +359,42 @@ def test_database_rejects_fabricated_reprocessing_history(tmp_path):
             (queued.job_id, (NOW + timedelta(minutes=1)).isoformat()),
         )
 
+    job = conn.execute(
+        "SELECT updated_at FROM fca_reprocessing_jobs WHERE id = ?",
+        (queued.job_id,),
+    ).fetchone()
+    with pytest.raises(sqlite3.IntegrityError, match="history"):
+        conn.execute(
+            """
+            INSERT INTO fca_reprocessing_job_events (
+                job_id, from_state, to_state, attempt_count,
+                outcome_code, occurred_at
+            ) VALUES (?, NULL, 'pending', 0, NULL, ?)
+            """,
+            (queued.job_id, job["updated_at"]),
+        )
+
+    running_at = (NOW + timedelta(minutes=2)).isoformat()
+    conn.execute(
+        """
+        UPDATE fca_reprocessing_jobs
+        SET state = 'running', attempt_count = 1, claimed_at = ?,
+            claim_token = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (running_at, "a" * 32, running_at, queued.job_id),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="history"):
+        conn.execute(
+            """
+            INSERT INTO fca_reprocessing_job_events (
+                job_id, from_state, to_state, attempt_count,
+                outcome_code, occurred_at
+            ) VALUES (?, NULL, 'running', 1, NULL, ?)
+            """,
+            (queued.job_id, running_at),
+        )
+
 
 def test_database_rejects_mutable_or_mismatched_research_dependencies(tmp_path):
     conn = connect_database(tmp_path / "govscout.sqlite3")

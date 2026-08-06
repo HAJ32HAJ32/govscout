@@ -607,7 +607,8 @@ WHEN NOT (
             AND NEW.outcome_code IS NULL
         )
         OR (
-            NEW.from_state = (
+            NEW.from_state IS NOT NULL
+            AND NEW.from_state IS (
                 SELECT to_state FROM fca_reprocessing_job_events
                 WHERE job_id = NEW.job_id ORDER BY id DESC LIMIT 1
             )
