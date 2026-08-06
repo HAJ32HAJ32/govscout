@@ -107,6 +107,58 @@
             {% endfor %}
           </ul>
           {% else %}<p>No website evidence has been gathered yet.</p>{% endif %}
+          {% if firm.website_evidence_action == "assert" %}
+          <p><strong>Researched official website:</strong>
+            <a href="{{ firm.researched_website_url }}" target="_blank" rel="noopener noreferrer">{{ firm.researched_website_url }}</a>
+            · <a href="{{ firm.website_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
+          </p>
+          <p><strong>Justification:</strong> {{ firm.website_justification }}</p>
+          <p><strong>Reprocessing:</strong> {{ firm.reprocessing_state or "Not requested" }}{% if firm.reprocessing_outcome %} · {{ firm.reprocessing_outcome }}{% endif %}</p>
+          {% endif %}
+          {% if firm.website_evidence_action != "assert" %}
+          {% if candidate_search_enabled %}
+          <form class="review" action="/today/research/{{ firm.id }}/website/candidates" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="approve" type="submit">Find likely websites</button>
+          </form>
+          {% endif %}
+          {% for candidate in firm.website_candidates %}
+          <section class="evidence" aria-label="Suggested website">
+            <p><strong>Suggested website:</strong> <a href="{{ candidate.website_url }}" target="_blank" rel="noopener noreferrer">{{ candidate.website_url }}</a></p>
+            <p>{{ candidate.title }}{% if candidate.snippet %} · {{ candidate.snippet }}{% endif %}</p>
+            <form class="review" action="/today/research/{{ firm.id }}/website/candidates/{{ candidate.id }}/confirm" method="post">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id or '' }}">
+              <button class="approve" type="submit">Confirm this website and run checks</button>
+            </form>
+          </section>
+          {% endfor %}
+          <form class="review" action="/today/research/{{ firm.id }}/website/confirm" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id or '' }}">
+            <label>Official website URL<input name="website_url" type="url" required maxlength="2048"></label>
+            <label>Where did you confirm it?<input name="evidence_url" type="url" required maxlength="2048"></label>
+            <label class="wide">Why this is the official website<textarea name="justification" rows="2" required maxlength="1000"></textarea></label>
+            <button class="approve" type="submit">Confirm website and run checks</button>
+          </form>
+          {% endif %}
+          {% if firm.website_evidence_action == "assert" %}
+          <form class="review" action="/today/research/{{ firm.id }}/website" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id }}">
+            <input type="hidden" name="action" value="withdraw">
+            <input type="hidden" name="website_url" value="{{ firm.researched_website_url }}">
+            <input type="hidden" name="evidence_url" value="{{ firm.website_evidence_url }}">
+            <label class="wide">Why withdraw this website evidence?<input name="justification" required maxlength="1000"></label>
+            <button class="reject" type="submit">Withdraw website evidence</button>
+          </form>
+          {% endif %}
+          <form class="review" action="/today/research/{{ firm.id }}/archive" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="expected_archive_event_id" value="{{ firm.archive_event_id or '' }}">
+            <label class="wide">Why archive this firm?<input name="reason" required maxlength="500"></label>
+            <button class="reject" type="submit" name="action" value="archive">Archive</button>
+          </form>
         </article>
         {% endfor %}
       {% else %}<p>No firms need research.</p>{% endif %}
@@ -162,6 +214,23 @@
             {% endfor %}
           </ul>
           {% else %}<p>No website evidence has been gathered yet.</p>{% endif %}
+          {% if firm.website_evidence_action == "assert" %}
+          <p><strong>Researched official website:</strong>
+            <a href="{{ firm.researched_website_url }}" target="_blank" rel="noopener noreferrer">{{ firm.researched_website_url }}</a>
+            · <a href="{{ firm.website_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
+          </p>
+          <p><strong>Justification:</strong> {{ firm.website_justification }}</p>
+          <p><strong>Reprocessing:</strong> {{ firm.reprocessing_state or "Not requested" }}{% if firm.reprocessing_outcome %} · {{ firm.reprocessing_outcome }}{% endif %}</p>
+          <form class="review" action="/today/research/{{ firm.id }}/website" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id }}">
+            <input type="hidden" name="action" value="withdraw">
+            <input type="hidden" name="website_url" value="{{ firm.researched_website_url }}">
+            <input type="hidden" name="evidence_url" value="{{ firm.website_evidence_url }}">
+            <label class="wide">Why withdraw this website evidence?<input name="justification" required maxlength="1000"></label>
+            <button class="reject" type="submit">Withdraw website evidence</button>
+          </form>
+          {% endif %}
           <form class="review" action="/today/review/{{ firm.id }}" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="qc_run_id" value="{{ firm.qc_run_id or '' }}">
@@ -179,6 +248,26 @@
         <p>No firms are ready to review yet.</p>
       {% endif %}
     </section>
+
+    {% if archived_firms %}
+    <section class="worklist" aria-labelledby="archived-title">
+      <h2 id="archived-title">Archived firms</h2>
+      <p>Archived firms are excluded from processing, review approval and outreach readiness. Restoring one returns it to the appropriate research or review queue; it does not revive an old approval.</p>
+      {% for firm in archived_firms %}
+      <article class="firm">
+        <h3>{{ firm.firm_name }}</h3>
+        <div class="meta">FCA reference {{ firm.frn }} · <a href="{{ firm.fca_register_url }}" target="_blank" rel="noopener noreferrer">Find on FCA Register</a></div>
+        <p><strong>Archived because:</strong> {{ firm.archive_reason }}</p>
+        <form class="review" action="/today/research/{{ firm.id }}/archive" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_archive_event_id" value="{{ firm.archive_event_id }}">
+          <label class="wide">Why restore this firm?<input name="reason" required maxlength="500"></label>
+          <button class="approve" type="submit" name="action" value="restore">Restore</button>
+        </form>
+      </article>
+      {% endfor %}
+    </section>
+    {% endif %}
 
   </main>
 </body>

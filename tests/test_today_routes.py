@@ -6,13 +6,18 @@ import pytest
 
 from govscout.config import load_settings
 from govscout.db import connect_database, insert_verified_lead, migrate
+from govscout.fca_pipeline import verify_firm
 from govscout.draft_service import DraftOutcomeUncertain, DraftService
 from govscout.policy import PolicyResult
 from govscout.sendguard import ReservationRequest, SendGuard
 from govscout.web.app import create_app
+from govscout.website_candidates import WebsiteCandidate
+from govscout.website_research import record_website_evidence
 from tests.support import (
     verified_company_from_test_profile as verified_company_from_profile,
 )
+from tests.test_processing_queue import NOW as PROCESSING_NOW
+from tests.test_processing_queue import _companies_house, _queue_firm
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -65,6 +70,27 @@ class ReturningDraftService:
             draft_id="draft-1",
             send_id=1,
         )
+
+
+class StaticWebsiteCandidates:
+    def search(self, *, query, limit):
+        assert '"Example Finance Ltd"' in query
+        assert "12345678" in query
+        assert limit == 8
+        return [
+            WebsiteCandidate(
+                website_url="https://example-firm.test/",
+                title="Example Finance Ltd — Official website",
+                snippet="Example Finance Ltd provides regulated financial services.",
+                source_url="https://search.example.test/result/1",
+            ),
+            WebsiteCandidate(
+                website_url="https://www.linkedin.com/company/example-firm/",
+                title="Example Firm Ltd | LinkedIn",
+                snippet="Company profile",
+                source_url="https://search.example.test/result/2",
+            ),
+        ]
 
 
 def test_today_omits_drafting_presentation_without_loading_draft_work(tmp_path, monkeypatch):
@@ -268,6 +294,389 @@ def test_today_shows_branded_fca_evidence_score_and_review_controls(tmp_path):
     assert 'action="/today/review/1"' not in page
     assert 'action="/today/draft/' not in page
     assert '<label>Reason for rejecting<input name="rejection_reason"' not in page
+
+
+def test_research_firm_can_be_archived_and_restored_with_append_only_events(tmp_path):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    firm_id = conn.execute(
+        """
+        INSERT INTO fca_firms (
+            frn, firm_name, fca_status, is_active, source_url,
+            source_record_hash, first_seen_at, last_seen_at
+        ) VALUES ('123456', 'Research Firm Ltd', 'Authorised', 1, ?, ?, ?, ?)
+        """,
+        (
+            "https://register.fca.org.uk/s/firm?id=123456",
+            "a" * 64,
+            "2026-08-05T10:00:00+00:00",
+            "2026-08-05T10:00:00+00:00",
+        ),
+    ).lastrowid
+    conn.close()
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        now_provider=lambda: datetime(2026, 8, 5, 11, tzinfo=UTC),
+    )
+    client = app.test_client()
+    page = client.get("/today").get_data(as_text=True)
+    assert f'action="/today/research/{firm_id}/archive"' in page
+    with client.session_transaction() as browser_session:
+        token = browser_session["csrf_token"]
+
+    missing_reason = client.post(
+        f"/today/research/{firm_id}/archive",
+        data={"csrf_token": token, "action": "archive"},
+    )
+    archived = client.post(
+        f"/today/research/{firm_id}/archive",
+        data={
+            "csrf_token": token,
+            "action": "archive",
+            "reason": "Outside the current MISE target market",
+        },
+    )
+
+    assert missing_reason.status_code == 422
+    assert archived.status_code == 303
+    stale_archive = client.post(
+        f"/today/research/{firm_id}/archive",
+        data={
+            "csrf_token": token,
+            "action": "archive",
+            "reason": "Duplicate stale click",
+        },
+    )
+    assert stale_archive.status_code == 409
+    archived_page = client.get("/today").get_data(as_text=True)
+    assert "Archived firms" in archived_page
+    assert "Outside the current MISE target market" in archived_page
+
+    restored = client.post(
+        f"/today/research/{firm_id}/archive",
+        data={
+            "csrf_token": token,
+            "action": "restore",
+            "reason": "Reconsidering after new information",
+            "expected_archive_event_id": "1",
+        },
+    )
+    assert restored.status_code == 303
+    restored_page = client.get("/today").get_data(as_text=True)
+    assert "Outside the current MISE target market" not in restored_page
+    verify = connect_database(database)
+    events = verify.execute(
+        """
+        SELECT action, reason, actor, expected_previous_event_id
+        FROM firm_archive_events ORDER BY id
+        """
+    ).fetchall()
+    assert [tuple(row) for row in events] == [
+        ("archive", "Outside the current MISE target market", "local-operator", None),
+        ("restore", "Reconsidering after new information", "local-operator", 1),
+    ]
+    with pytest.raises(Exception):
+        verify.execute("UPDATE firm_archive_events SET action = 'restore' WHERE id = 1")
+
+
+def test_legacy_separate_website_actions_remain_safe_but_are_not_presented(tmp_path, monkeypatch):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    _queue_firm(conn, website=None)
+    firm = conn.execute("SELECT * FROM fca_firms WHERE frn = '123456'").fetchone()
+    assert firm is not None
+    verification = verify_firm(
+        conn,
+        firm_id=firm["id"],
+        companies_house=_companies_house(),
+        now=PROCESSING_NOW,
+    )
+    assert verification.verified is True
+    conn.close()
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        now_provider=lambda: PROCESSING_NOW,
+    )
+    client = app.test_client()
+    page = client.get("/today").get_data(as_text=True)
+    assert f'action="/today/research/{firm["id"]}/website/confirm"' in page
+    assert f'action="/today/research/{firm["id"]}/website"' not in page
+    with client.session_transaction() as browser_session:
+        token = browser_session["csrf_token"]
+
+    malformed = client.post(
+        f"/today/research/{firm['id']}/website",
+        data={"csrf_token": token, "action": "assert"},
+    )
+    assert malformed.status_code == 422
+
+    missing_csrf = client.post(
+        f"/today/research/{firm['id']}/website",
+        data={
+            "action": "assert",
+            "website_url": "https://official.example.test/",
+            "evidence_url": "https://official.example.test/legal",
+            "justification": "The legal page names the regulated company.",
+        },
+    )
+    assert missing_csrf.status_code == 403
+    recorded = client.post(
+        f"/today/research/{firm['id']}/website",
+        data={
+            "csrf_token": token,
+            "action": "assert",
+            "website_url": "https://official.example.test/",
+            "evidence_url": "https://official.example.test/legal",
+            "justification": "The legal page names the regulated company.",
+        },
+    )
+    assert recorded.status_code == 303
+    page = client.get("/today").get_data(as_text=True)
+    assert "Researched official website" in page
+    assert "https://official.example.test/" in page
+    assert f'action="/today/research/{firm["id"]}/website/reprocess"' not in page
+
+    malformed_reprocessing = client.post(
+        f"/today/research/{firm['id']}/website/reprocess",
+        data={"csrf_token": token, "website_evidence_event_id": "1"},
+    )
+    assert malformed_reprocessing.status_code == 422
+
+    queued = client.post(
+        f"/today/research/{firm['id']}/website/reprocess",
+        data={
+            "csrf_token": token,
+            "website_evidence_event_id": "1",
+            "request_reason": "Process against the verified official website.",
+        },
+    )
+    assert queued.status_code == 303
+    verify = connect_database(database)
+    evidence = verify.execute(
+        "SELECT action, website_url, actor FROM firm_website_evidence_events"
+    ).fetchone()
+    job = verify.execute(
+        "SELECT state, website_evidence_event_id FROM fca_reprocessing_jobs"
+    ).fetchone()
+    assert tuple(evidence) == (
+        "assert", "https://official.example.test/", "local-operator"
+    )
+    assert tuple(job) == ("pending", 1)
+
+    run_id = verify.execute(
+        """
+        INSERT INTO enrichment_runs (
+            firm_id, state, started_at, completed_at, website_url, final_url,
+            input_hash, page_hash, score, temperature,
+            website_evidence_event_id, company_verification_attempt_id
+        ) VALUES (?, 'complete', ?, ?, ?, ?, ?, ?, 50, 'WARM', 1, ?)
+        """,
+        (
+            firm["id"],
+            PROCESSING_NOW.isoformat(),
+            PROCESSING_NOW.isoformat(),
+            "https://official.example.test/",
+            "https://official.example.test/",
+            "b" * 64,
+            "c" * 64,
+            verification.attempt_id,
+        ),
+    ).lastrowid
+    verify.execute(
+        """
+        INSERT INTO qc_runs (
+            firm_id, enrichment_run_id, state, reason_codes, input_hash,
+            checked_at, expires_at, company_verification_attempt_id,
+            website_evidence_event_id
+        ) VALUES (?, ?, 'pass', '[]', ?, ?, ?, ?, 1)
+        """,
+        (
+            firm["id"],
+            run_id,
+            "d" * 64,
+            PROCESSING_NOW.isoformat(),
+            "2026-09-01T10:00:00+00:00",
+            verification.attempt_id,
+        ),
+    )
+    verify.close()
+    monkeypatch.setattr("govscout.web.app.qc_is_current", lambda *_args, **_kwargs: True)
+
+    review_page = client.get("/today").get_data(as_text=True)
+    assert "Firms to review" in review_page
+    assert "Researched official website" in review_page
+    assert "Supporting source" in review_page
+    assert "Why withdraw this website evidence?" in review_page
+
+
+def test_manual_website_confirmation_records_evidence_and_queues_checks_in_one_action(tmp_path):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    _queue_firm(conn, website=None)
+    firm = conn.execute("SELECT * FROM fca_firms WHERE frn = '123456'").fetchone()
+    assert firm is not None
+    verification = verify_firm(
+        conn,
+        firm_id=firm["id"],
+        companies_house=_companies_house(),
+        now=PROCESSING_NOW,
+    )
+    assert verification.verified is True
+    conn.close()
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        now_provider=lambda: PROCESSING_NOW,
+    )
+    client = app.test_client()
+    page = client.get("/today").get_data(as_text=True)
+    assert "Confirm website and run checks" in page
+    assert f'action="/today/research/{firm["id"]}/website/confirm"' in page
+    assert "Request reprocessing" not in page
+    with client.session_transaction() as browser_session:
+        token = browser_session["csrf_token"]
+
+    confirmed = client.post(
+        f"/today/research/{firm['id']}/website/confirm",
+        data={
+            "csrf_token": token,
+            "website_url": "https://official.example.test/",
+            "evidence_url": "https://official.example.test/legal",
+            "justification": "The legal page names the regulated company.",
+        },
+    )
+
+    assert confirmed.status_code == 303
+    verify = connect_database(database)
+    evidence = verify.execute(
+        "SELECT id, action, website_url FROM firm_website_evidence_events"
+    ).fetchone()
+    job = verify.execute(
+        "SELECT state, website_evidence_event_id FROM fca_reprocessing_jobs"
+    ).fetchone()
+    assert tuple(evidence) == (1, "assert", "https://official.example.test/")
+    assert tuple(job) == ("pending", 1)
+
+
+def test_workbench_discovers_candidates_and_confirms_one_into_bounded_checks(tmp_path):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    _queue_firm(conn, website=None)
+    firm = conn.execute("SELECT * FROM fca_firms WHERE frn = '123456'").fetchone()
+    assert firm is not None
+    conn.execute(
+        "UPDATE fca_firms SET firm_name = 'Example Finance Ltd' WHERE id = ?",
+        (firm["id"],),
+    )
+    verification = verify_firm(
+        conn,
+        firm_id=firm["id"],
+        companies_house=_companies_house(),
+        now=PROCESSING_NOW,
+    )
+    assert verification.verified is True
+    conn.close()
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        now_provider=lambda: PROCESSING_NOW,
+        website_candidate_provider=StaticWebsiteCandidates(),
+    )
+    client = app.test_client()
+    page = client.get("/today").get_data(as_text=True)
+    assert "Find likely websites" in page
+    with client.session_transaction() as browser_session:
+        token = browser_session["csrf_token"]
+
+    discovered = client.post(
+        f"/today/research/{firm['id']}/website/candidates",
+        data={"csrf_token": token},
+    )
+    assert discovered.status_code == 303, discovered.get_json()
+    candidate_page = client.get("/today").get_data(as_text=True)
+    assert "Suggested website" in candidate_page
+    assert "https://example-firm.test/" in candidate_page
+    assert "LinkedIn" not in candidate_page
+    assert "Confirm this website and run checks" in candidate_page
+
+    confirmed = client.post(
+        f"/today/research/{firm['id']}/website/candidates/1/confirm",
+        data={"csrf_token": token},
+    )
+    assert confirmed.status_code == 303
+    verify = connect_database(database)
+    evidence = verify.execute(
+        "SELECT website_url, evidence_url, justification FROM firm_website_evidence_events"
+    ).fetchone()
+    job = verify.execute("SELECT state FROM fca_reprocessing_jobs").fetchone()
+    assert evidence["website_url"] == "https://example-firm.test/"
+    assert evidence["evidence_url"] == "https://search.example.test/result/1"
+    assert "confirmed" in evidence["justification"].lower()
+    assert job["state"] == "pending"
+
+
+def test_stale_candidate_form_cannot_supersede_newer_website_evidence(tmp_path):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    _queue_firm(conn, website=None)
+    firm = conn.execute("SELECT * FROM fca_firms WHERE frn = '123456'").fetchone()
+    verification = verify_firm(
+        conn,
+        firm_id=firm["id"],
+        companies_house=_companies_house(),
+        now=PROCESSING_NOW,
+    )
+    assert verification.verified is True
+    conn.close()
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        now_provider=lambda: PROCESSING_NOW,
+        website_candidate_provider=StaticWebsiteCandidates(),
+    )
+    client = app.test_client()
+    client.get("/today")
+    with client.session_transaction() as browser_session:
+        token = browser_session["csrf_token"]
+    assert client.post(
+        f"/today/research/{firm['id']}/website/candidates",
+        data={"csrf_token": token},
+    ).status_code == 303
+
+    concurrent = connect_database(database)
+    record_website_evidence(
+        concurrent,
+        firm_id=firm["id"],
+        action="assert",
+        website_url="https://newer.example.test/",
+        evidence_url="https://newer.example.test/legal",
+        justification="A newer operator tab confirmed this official website.",
+        actor="other-operator",
+        expected_previous_event_id=None,
+        now=PROCESSING_NOW,
+    )
+    concurrent.close()
+
+    stale = client.post(
+        f"/today/research/{firm['id']}/website/candidates/1/confirm",
+        data={
+            "csrf_token": token,
+            "expected_website_evidence_event_id": "",
+        },
+    )
+    assert stale.status_code == 409
+    verify = connect_database(database)
+    assert verify.execute(
+        "SELECT count(*) FROM firm_website_evidence_events"
+    ).fetchone()[0] == 1
+    assert verify.execute("SELECT count(*) FROM fca_reprocessing_jobs").fetchone()[0] == 0
 
 
 def test_today_does_not_present_expired_qc_as_passing_or_approvable(tmp_path):

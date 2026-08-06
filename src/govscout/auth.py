@@ -28,8 +28,15 @@ class AuthConfig:
     max_failures: int = 5
 
     def __post_init__(self) -> None:
-        if not self.username or self.username != self.username.strip():
-            raise ValueError("authentication username must be non-empty and trimmed")
+        if (
+            not self.username
+            or self.username != self.username.strip()
+            or len(self.username) > 100
+            or any(not 32 <= ord(character) <= 126 for character in self.username)
+        ):
+            raise ValueError(
+                "authentication username must be 1-100 printable ASCII characters and trimmed"
+            )
         if not _valid_hash_shape(self.password_hash):
             raise ValueError("authentication password hash is invalid")
         if not isinstance(self.session_secret, bytes) or len(self.session_secret) < 32:

@@ -9,6 +9,10 @@ from urllib.parse import urlsplit
 
 from govscout.db import ALLOWED_LEGAL_FORMS
 from govscout.fca_discovery import FcaDataError, canonicalize_website_url
+from govscout.website_research import (
+    WebsiteResearchConflict,
+    load_current_reprocessing_input,
+)
 
 FCA_MAX_AGE = timedelta(days=30)
 COMPANIES_HOUSE_MAX_AGE = timedelta(days=30)
@@ -30,10 +34,15 @@ def _utc(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _duplicate_snapshot(conn: sqlite3.Connection, firm: sqlite3.Row) -> list[dict[str, object]]:
-    if not firm["website_url"]:
+def _duplicate_snapshot(
+    conn: sqlite3.Connection,
+    firm: sqlite3.Row,
+    website_url: str | None = None,
+) -> list[dict[str, object]]:
+    website = website_url if website_url is not None else firm["website_url"]
+    if not website:
         return []
-    rows = conn.execute(
+    rows = list(conn.execute(
         """
         SELECT id, frn, fca_status, is_active, website_url,
                source_record_hash, last_seen_at
@@ -41,8 +50,27 @@ def _duplicate_snapshot(conn: sqlite3.Connection, firm: sqlite3.Row) -> list[dic
         WHERE id != ? AND is_active = 1 AND website_url = ?
         ORDER BY id
         """,
-        (firm["id"], firm["website_url"]),
-    ).fetchall()
+        (firm["id"], website),
+    ).fetchall())
+    rows.extend(
+        conn.execute(
+            """
+            SELECT other.id, other.frn, other.fca_status, other.is_active,
+                   evidence.website_url, other.source_record_hash,
+                   other.last_seen_at
+            FROM fca_firms AS other
+            JOIN firm_website_evidence_events AS evidence ON evidence.id = (
+                SELECT id FROM firm_website_evidence_events
+                WHERE firm_id = other.id ORDER BY id DESC LIMIT 1
+            )
+            WHERE other.id != ? AND other.is_active = 1
+              AND evidence.action = 'assert' AND evidence.website_url = ?
+              AND evidence.fca_source_record_hash = other.source_record_hash
+            ORDER BY other.id
+            """,
+            (firm["id"], website),
+        ).fetchall()
+    )
     return [dict(row) for row in rows]
 
 
@@ -126,6 +154,31 @@ def company_verification_is_current(
     )
 
 
+def _current_website_event(
+    conn: sqlite3.Connection,
+    *,
+    firm: sqlite3.Row,
+    run: sqlite3.Row | None,
+) -> sqlite3.Row | None:
+    if run is None or run["website_evidence_event_id"] is None:
+        return None
+    event = conn.execute(
+        """
+        SELECT * FROM firm_website_evidence_events
+        WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+        """,
+        (firm["id"],),
+    ).fetchone()
+    if (
+        event is None
+        or event["id"] != run["website_evidence_event_id"]
+        or event["action"] != "assert"
+        or event["fca_source_record_hash"] != firm["source_record_hash"]
+    ):
+        return None
+    return event
+
+
 def _qc_input_hash(
     conn: sqlite3.Connection,
     firm: sqlite3.Row,
@@ -159,6 +212,8 @@ def _qc_input_hash(
         "score",
         "temperature",
         "failure_code",
+        "website_evidence_event_id",
+        "company_verification_attempt_id",
     )
     evidence_fields = (
         "id",
@@ -172,6 +227,11 @@ def _qc_input_hash(
         "observed_at",
         "content_hash",
     )
+    website_event = _current_website_event(conn, firm=firm, run=run)
+    effective_website = (
+        website_event["website_url"]
+        if website_event is not None else firm["website_url"]
+    )
     payload = {
         "firm": {field: firm[field] for field in firm_fields},
         "lead": (
@@ -181,7 +241,12 @@ def _qc_input_hash(
             else None
         ),
         "company_verification": _latest_company_verification(conn, firm),
-        "duplicate_websites": _duplicate_snapshot(conn, firm),
+        "website_evidence": (
+            dict(website_event) if website_event is not None else None
+        ),
+        "duplicate_websites": _duplicate_snapshot(
+            conn, firm, effective_website
+        ),
         "duplicate_companies": _duplicate_company_snapshot(conn, firm),
         "enrichment": (
             {field: run[field] for field in run_fields} if run is not None else None
@@ -229,9 +294,20 @@ def _evaluate_current(
         reasons.add("FCA_NOT_ACTIVE")
     if current - _utc(firm["last_seen_at"]) > FCA_MAX_AGE:
         reasons.add("FCA_EVIDENCE_STALE")
-    if not firm["website_url"]:
+    website_event = _current_website_event(conn, firm=firm, run=run)
+    if (
+        run is not None
+        and run["website_evidence_event_id"] is not None
+        and website_event is None
+    ):
+        reasons.add("WEBSITE_EVIDENCE_CHANGED")
+    effective_website = (
+        website_event["website_url"]
+        if website_event is not None else firm["website_url"]
+    )
+    if not effective_website:
         reasons.add("WEBSITE_MISSING")
-    elif _duplicate_snapshot(conn, firm):
+    elif _duplicate_snapshot(conn, firm, effective_website):
         reasons.add("DUPLICATE_WEBSITE")
     if _duplicate_company_snapshot(conn, firm):
         reasons.add("DUPLICATE_COMPANY_NUMBER")
@@ -248,16 +324,39 @@ def _evaluate_current(
     else:
         if current - _utc(run["completed_at"]) > ENRICHMENT_MAX_AGE:
             reasons.add("SCAN_STALE")
-        if run["input_hash"] != firm["source_record_hash"]:
-            reasons.add("SOURCE_CHANGED_SINCE_SCAN")
-        website_origin = urlsplit(firm["website_url"])
+        if run["website_evidence_event_id"] is None:
+            if run["input_hash"] != firm["source_record_hash"]:
+                reasons.add("SOURCE_CHANGED_SINCE_SCAN")
+        else:
+            job = conn.execute(
+                """
+                SELECT id FROM fca_reprocessing_jobs
+                WHERE firm_id = ? AND input_hash = ?
+                  AND website_evidence_event_id = ?
+                  AND company_verification_attempt_id = ?
+                """,
+                (
+                    firm["id"], run["input_hash"],
+                    run["website_evidence_event_id"],
+                    run["company_verification_attempt_id"],
+                ),
+            ).fetchone()
+            try:
+                if job is None:
+                    raise WebsiteResearchConflict("reprocessing job missing")
+                load_current_reprocessing_input(
+                    conn, job_id=int(job["id"]), now=current
+                )
+            except (KeyError, ValueError, WebsiteResearchConflict):
+                reasons.add("REPROCESSING_INPUT_CHANGED")
+        website_origin = urlsplit(effective_website or "")
         final_origin = urlsplit(run["final_url"])
         try:
             canonical_final = canonicalize_website_url(run["final_url"])
         except FcaDataError:
             canonical_final = None
         if (
-            run["website_url"] != firm["website_url"]
+            run["website_url"] != effective_website
             or canonical_final != run["final_url"]
             or (
                 website_origin.scheme,
@@ -324,8 +423,9 @@ def run_qc(conn: sqlite3.Connection, *, firm_id: int, now: datetime) -> QcResult
             """
             INSERT INTO qc_runs (
                 firm_id, enrichment_run_id, state, reason_codes,
-                input_hash, checked_at, expires_at, company_verification_attempt_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                input_hash, checked_at, expires_at,
+                company_verification_attempt_id, website_evidence_event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 firm_id,
@@ -336,6 +436,11 @@ def run_qc(conn: sqlite3.Connection, *, firm_id: int, now: datetime) -> QcResult
                 checked,
                 expires,
                 verification_attempt_id,
+                (
+                    run["website_evidence_event_id"]
+                    if run is not None and run["state"] == "complete"
+                    else None
+                ),
             ),
         ).lastrowid
         if qc_run_id is None:
@@ -384,6 +489,7 @@ def qc_is_current(
         run is None
         or run["state"] != "complete"
         or run["id"] != qc["enrichment_run_id"]
+        or run["website_evidence_event_id"] != qc["website_evidence_event_id"]
         or _evaluate_current(
             conn, firm=firm, run=run, evidence=evidence, current=current
         )
@@ -410,6 +516,15 @@ def review_firm(
         raise sqlite3.OperationalError("firm review requires no active transaction")
     try:
         conn.execute("BEGIN IMMEDIATE")
+        archive = conn.execute(
+            """
+            SELECT id, action FROM firm_archive_events
+            WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (firm_id,),
+        ).fetchone()
+        if archive is not None and archive["action"] == "archive":
+            raise ValueError("archived firms cannot be reviewed")
         if decision == "approved":
             if qc_run_id is None or not qc_is_current(
                 conn, firm_id=firm_id, qc_run_id=qc_run_id, now=now
@@ -421,8 +536,9 @@ def review_firm(
         conn.execute(
             """
             INSERT INTO firm_reviews (
-                firm_id, decision, qc_run_id, notes, rejection_reason, reviewed_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                firm_id, decision, qc_run_id, notes, rejection_reason, reviewed_at,
+                archive_event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 firm_id,
@@ -431,6 +547,7 @@ def review_firm(
                 notes.strip() if notes and notes.strip() else None,
                 rejection_reason.strip() if rejection_reason else None,
                 now.astimezone(UTC).isoformat(),
+                int(archive["id"]) if archive is not None else None,
             ),
         )
         conn.execute("COMMIT")
@@ -441,6 +558,15 @@ def review_firm(
 
 
 def is_outreach_ready(conn: sqlite3.Connection, *, firm_id: int, now: datetime) -> bool:
+    archive = conn.execute(
+        """
+        SELECT id, action FROM firm_archive_events
+        WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+        """,
+        (firm_id,),
+    ).fetchone()
+    if archive is not None and archive["action"] == "archive":
+        return False
     firm = conn.execute(
         """
         SELECT f.lead_id, l.contact_email
@@ -454,7 +580,7 @@ def is_outreach_ready(conn: sqlite3.Connection, *, firm_id: int, now: datetime) 
         return False
     review = conn.execute(
         """
-        SELECT decision, qc_run_id FROM firm_reviews
+        SELECT decision, qc_run_id, archive_event_id FROM firm_reviews
         WHERE firm_id = ? ORDER BY id DESC LIMIT 1
         """,
         (firm_id,),
@@ -463,5 +589,7 @@ def is_outreach_ready(conn: sqlite3.Connection, *, firm_id: int, now: datetime) 
         review
         and review["decision"] == "approved"
         and review["qc_run_id"] is not None
+        and review["archive_event_id"]
+        == (int(archive["id"]) if archive is not None else None)
         and qc_is_current(conn, firm_id=firm_id, qc_run_id=review["qc_run_id"], now=now)
     )

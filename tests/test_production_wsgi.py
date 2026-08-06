@@ -62,3 +62,11 @@ def test_public_factory_migrates_database_and_serves_only_exact_host(tmp_path):
     assert login.status_code == 200
     assert forged.status_code == 200
     assert direct.status_code == 400
+
+
+def test_public_factory_validates_optional_website_search_endpoint(tmp_path):
+    environment = _environment(tmp_path)
+    environment["GOVSCOUT_SEARCH_ENDPOINT"] = "http://unsafe.example.test/search"
+
+    with pytest.raises(ValueError, match="SearXNG endpoint"):
+        create_production_app(environment)

@@ -22,6 +22,11 @@ def process_firm(
     firm_id: int,
     companies_house: CompanyVerifier,
     site_transport: SiteTransport,
+    website_url: str | None = None,
+    website_evidence_event_id: int | None = None,
+    company_verification_attempt_id: int | None = None,
+    processing_input_hash: str | None = None,
+    reprocessing_job_id: int | None = None,
     now: datetime,
 ) -> ProcessingResult:
     verification = verify_firm(
@@ -34,6 +39,11 @@ def process_firm(
         conn,
         firm_id=firm_id,
         transport=site_transport,
+        website_url=website_url,
+        website_evidence_event_id=website_evidence_event_id,
+        company_verification_attempt_id=company_verification_attempt_id,
+        processing_input_hash=processing_input_hash,
+        reprocessing_job_id=reprocessing_job_id,
         now=now,
     )
     qc = run_qc(conn, firm_id=firm_id, now=now)
