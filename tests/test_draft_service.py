@@ -11,7 +11,7 @@ from govscout.draft_service import (
     DraftPolicyRefused,
     DraftService,
 )
-from govscout.enrichment import SitePage, run_enrichment
+from govscout.enrichment import SiteFetchError, SitePage, run_enrichment
 from govscout.fca_discovery import ingest_fca_records, parse_fca_json
 from govscout.policy import LintNotReadyPolicy, PolicyResult
 from govscout.quality import review_firm, run_qc
@@ -140,6 +140,8 @@ def _approve_fca_firm(conn, lead_id, *, now):
                 "https://example.test/careers": "Careers for our Copilot-enabled team.",
                 "https://example.test/ai-policy": "Our AI governance policy and oversight.",
             }
+            if url not in pages:
+                raise SiteFetchError("NOT_FOUND")
             return SitePage(
                 url=url,
                 final_url=url,

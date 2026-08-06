@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from govscout.cli import main
 from govscout.companies_house import CompaniesHouseClient
 from govscout.db import connect_database, migrate
-from govscout.enrichment import SitePage
+from govscout.enrichment import SiteFetchError, SitePage
 from govscout.fca_pipeline import verify_and_promote_firm
 from tests.support import StubCompaniesHouseTransport
 
@@ -163,13 +163,15 @@ def test_cli_runs_repeatable_enrichment_and_qc_for_one_fca_firm(tmp_path, capsys
 
     class SiteTransport:
         def fetch_html(self, url):
-            html = {
+            pages = {
                 "https://example.test/": "FCA regulated AI-powered advice.",
                 "https://example.test/privacy": "Privacy and cookies only.",
                 "https://example.test/careers": "We use Copilot.",
                 "https://example.test/ai-policy": "Our AI governance policy.",
-            }[url]
-            return SitePage(url=url, final_url=url, html=html, fetched_at=now)
+            }
+            if url not in pages:
+                raise SiteFetchError("NOT_FOUND")
+            return SitePage(url=url, final_url=url, html=pages[url], fetched_at=now)
 
     enrich_exit = main(
         ["enrich-fca", "1"], conn=conn, now=now, site_transport=SiteTransport()
@@ -220,13 +222,15 @@ def test_cli_processes_verified_firm_to_qc_without_inventing_contact(tmp_path, c
 
     class SiteTransport:
         def fetch_html(self, url):
-            html = {
+            pages = {
                 "https://example.test/": "FCA regulated AI-powered advice.",
                 "https://example.test/privacy": "Privacy and automated decisions.",
                 "https://example.test/careers": "We use Copilot.",
                 "https://example.test/ai-policy": "Our AI governance policy.",
-            }[url]
-            return SitePage(url=url, final_url=url, html=html, fetched_at=now)
+            }
+            if url not in pages:
+                raise SiteFetchError("NOT_FOUND")
+            return SitePage(url=url, final_url=url, html=pages[url], fetched_at=now)
 
     exit_code = main(
         ["process-fca", "1"],

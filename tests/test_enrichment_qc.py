@@ -16,9 +16,11 @@ NOW = datetime(2026, 7, 25, 10, tzinfo=UTC)
 
 
 class FakeSiteTransport:
-    def __init__(self, pages):
+    def __init__(self, pages, *, sitemaps=None):
         self.pages = pages
+        self.sitemaps = sitemaps or {}
         self.urls = []
+        self.sitemap_urls = []
 
     def fetch_html(self, url):
         self.urls.append(url)
@@ -28,6 +30,15 @@ class FakeSiteTransport:
         if value is None:
             raise SiteFetchError("NOT_FOUND")
         return SitePage(url=url, final_url=url, html=value, fetched_at=NOW)
+
+    def fetch_sitemap(self, url):
+        self.sitemap_urls.append(url)
+        value = self.sitemaps.get(url)
+        if isinstance(value, Exception):
+            raise value
+        if value is None:
+            raise SiteFetchError("NOT_FOUND")
+        return value
 
 
 def _stage(conn, *, frn="123456", website="https://example.test/", observed=NOW):
@@ -193,14 +204,19 @@ def test_enrichment_records_honest_unknown_when_privacy_page_cannot_be_checked(t
     known_absences = conn.execute(
         """
         SELECT code, evidence_state, excerpt FROM evidence_items
-        WHERE run_id = ? AND code IN ('CAREERS_URL_NOT_FOUND', 'POLICY_URL_NOT_FOUND')
+        WHERE run_id = ? AND code IN (
+            'CAREERS_URL_NOT_FOUND', 'POLICY_URL_NOT_FOUND',
+            'TERMS_URL_NOT_FOUND', 'COOKIES_URL_NOT_FOUND'
+        )
         ORDER BY code
         """,
         (result.run_id,),
     ).fetchall()
     assert [tuple(row) for row in known_absences] == [
         ("CAREERS_URL_NOT_FOUND", "present", "Requested URL returned NOT_FOUND"),
+        ("COOKIES_URL_NOT_FOUND", "present", "Requested URL returned NOT_FOUND"),
         ("POLICY_URL_NOT_FOUND", "present", "Requested URL returned NOT_FOUND"),
+        ("TERMS_URL_NOT_FOUND", "present", "Requested URL returned NOT_FOUND"),
     ]
     assert result.temperature == "COOL"
 
@@ -230,11 +246,162 @@ def test_enrichment_discovers_same_origin_evidence_links_from_homepage(tmp_path)
         "https://example.test/privacy-policy",
         "https://example.test/jobs",
         "https://example.test/responsible-ai",
+        "https://example.test/terms",
+        "https://example.test/terms-and-conditions",
+        "https://example.test/cookies",
+        "https://example.test/cookie-policy",
     ]
     assert not conn.execute(
         "SELECT 1 FROM evidence_items WHERE run_id = ? AND evidence_state = 'unknown'",
         (result.run_id,),
     ).fetchone()
+
+
+def test_enrichment_discovers_terms_and_cookies_links_from_homepage(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+    transport = FakeSiteTransport(
+        {
+            "https://example.test/": """
+                <a href="/privacy">Privacy</a>
+                <a href="/careers">Careers</a>
+                <a href="/ai-policy">AI Policy</a>
+                <a href="/terms-of-service">Terms of Service</a>
+                <a href="/cookie-notice">Cookie notice</a>
+            """,
+            "https://example.test/privacy": "Privacy and automated decisions.",
+            "https://example.test/careers": "We use Copilot.",
+            "https://example.test/ai-policy": "Our AI governance policy.",
+            "https://example.test/terms-of-service": "Standard terms apply.",
+            "https://example.test/cookie-notice": "We use cookies for analytics.",
+        }
+    )
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    assert transport.urls == [
+        "https://example.test/",
+        "https://example.test/privacy",
+        "https://example.test/careers",
+        "https://example.test/ai-policy",
+        "https://example.test/terms-of-service",
+        "https://example.test/cookie-notice",
+    ]
+    assert not conn.execute(
+        "SELECT 1 FROM evidence_items WHERE run_id = ? AND evidence_state = 'unknown'",
+        (result.run_id,),
+    ).fetchone()
+
+
+def test_enrichment_finds_terms_via_second_guessed_path(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+    transport = FakeSiteTransport(
+        {
+            "https://example.test/": "FCA regulated. AI-powered advice.",
+            "https://example.test/privacy": "Privacy and automated decisions.",
+            "https://example.test/careers": "We use Copilot.",
+            "https://example.test/ai-policy": "Our AI governance policy.",
+            "https://example.test/terms-and-conditions": "Standard terms and conditions.",
+            "https://example.test/cookies": "We use cookies.",
+        }
+    )
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    assert transport.urls == [
+        "https://example.test/",
+        "https://example.test/privacy",
+        "https://example.test/careers",
+        "https://example.test/ai-policy",
+        "https://example.test/terms",
+        "https://example.test/terms-and-conditions",
+        "https://example.test/cookies",
+    ]
+    assert not conn.execute(
+        """
+        SELECT 1 FROM evidence_items
+        WHERE run_id = ? AND code IN ('TERMS_URL_NOT_FOUND', 'TERMS_SCAN_STATUS')
+        """,
+        (result.run_id,),
+    ).fetchone()
+
+
+def test_enrichment_falls_back_to_sitemap_for_missing_terms_page(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+    transport = FakeSiteTransport(
+        {
+            "https://example.test/": "FCA regulated. AI-powered advice.",
+            "https://example.test/privacy": "Privacy and automated decisions.",
+            "https://example.test/careers": "We use Copilot.",
+            "https://example.test/ai-policy": "Our AI governance policy.",
+            "https://example.test/legal/terms-of-use": "Standard terms of use apply.",
+            "https://example.test/cookies": "We use cookies.",
+        },
+        sitemaps={
+            "https://example.test/sitemap.xml": [
+                "https://example.test/",
+                "https://example.test/legal/terms-of-use",
+            ],
+        },
+    )
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    assert transport.sitemap_urls == ["https://example.test/sitemap.xml"]
+    assert transport.urls == [
+        "https://example.test/",
+        "https://example.test/privacy",
+        "https://example.test/careers",
+        "https://example.test/ai-policy",
+        "https://example.test/terms",
+        "https://example.test/terms-and-conditions",
+        "https://example.test/legal/terms-of-use",
+        "https://example.test/cookies",
+    ]
+    assert not conn.execute(
+        """
+        SELECT 1 FROM evidence_items
+        WHERE run_id = ? AND code IN ('TERMS_URL_NOT_FOUND', 'TERMS_SCAN_STATUS')
+        """,
+        (result.run_id,),
+    ).fetchone()
+
+
+def test_enrichment_non_not_found_failure_stops_further_guesses(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+    transport = FakeSiteTransport(
+        {
+            "https://example.test/": "FCA regulated. AI-powered advice.",
+            "https://example.test/privacy": "Privacy and automated decisions.",
+            "https://example.test/careers": "We use Copilot.",
+            "https://example.test/ai-policy": "Our AI governance policy.",
+            "https://example.test/terms": SiteFetchError("TIMEOUT"),
+            "https://example.test/cookies": "We use cookies.",
+        }
+    )
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    assert "https://example.test/terms-and-conditions" not in transport.urls
+    row = conn.execute(
+        """
+        SELECT code, evidence_state FROM evidence_items
+        WHERE run_id = ? AND code = 'TERMS_SCAN_STATUS'
+        """,
+        (result.run_id,),
+    ).fetchone()
+    assert tuple(row) == ("TERMS_SCAN_STATUS", "unknown")
 
 
 def test_same_origin_home_redirect_is_recorded_and_can_pass_qc(tmp_path):

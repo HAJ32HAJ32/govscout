@@ -6,6 +6,7 @@ import hashlib
 from html.parser import HTMLParser
 import http.client
 import ipaddress
+import re
 import socket
 import sqlite3
 import ssl
@@ -32,6 +33,31 @@ _FCA_IDENTITY_FIELDS = (
     "website_url", "source_location", "company_number", "lead_id", "source_record_hash",
     "first_seen_at", "last_seen_at",
 )
+_HTML_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
+_XML_CONTENT_TYPES = ("application/xml", "text/xml")
+SITEMAP_MAX_URLS = 200
+_SITEMAP_LOC_PATTERN = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.IGNORECASE)
+
+# One guessed path each for the original three keys (unchanged, to keep existing
+# behaviour/tests stable); terms and cookies get two guesses since they weren't
+# discoverable at all before.
+_GUESSED_PATHS = {
+    "privacy": ("privacy",),
+    "careers": ("careers",),
+    "policy": ("ai-policy",),
+    "terms": ("terms", "terms-and-conditions"),
+    "cookies": ("cookies", "cookie-policy"),
+}
+
+# Used to match sitemap.xml <loc> URL paths (not link text, so single hyphenated
+# tokens rather than the phrase-style terms used for scanning homepage link text).
+_SITEMAP_PATH_KEYWORDS = {
+    "privacy": ("privacy",),
+    "careers": ("career", "jobs"),
+    "policy": ("policy", "responsible-ai", "ai-governance"),
+    "terms": ("terms",),
+    "cookies": ("cookie",),
+}
 
 
 class SiteFetchError(ValueError):
@@ -71,6 +97,12 @@ class _Evidence:
 
 class SiteTransport(Protocol):
     def fetch_html(self, url: str) -> SitePage: ...
+
+    def fetch_sitemap(self, url: str) -> list[str]:
+        """Optional: return <loc> URLs from a sitemap.xml. Implementations that don't
+        support it may omit this method entirely -- callers treat it as unavailable
+        via getattr, not a hard requirement."""
+        ...
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -155,8 +187,11 @@ class UrlSiteTransport:
         self._resolver = resolver or socket.getaddrinfo
         self._clock = now_provider or (lambda: datetime.now(UTC))
 
-    def fetch_html(self, url: str) -> SitePage:
-        original_url = url
+    def _fetch_bytes(
+        self, url: str, *, accepted_content_types: tuple[str, ...]
+    ) -> tuple[bytes, str, str]:
+        """Core HTTPS-only, public-address, safely redirected, bounded fetch. Shared by
+        fetch_html and fetch_sitemap -- only the accepted content type differs."""
         try:
             canonical_url = canonicalize_website_url(url)
         except FcaDataError as exc:
@@ -190,7 +225,7 @@ class UrlSiteTransport:
             request = Request(
                 url,
                 headers={
-                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept": ",".join(accepted_content_types),
                     "Host": parsed.hostname,
                     "User-Agent": SITE_USER_AGENT,
                 },
@@ -228,10 +263,7 @@ class UrlSiteTransport:
                         raise SiteFetchError("FETCH_FAILED")
                     if response.geturl() != url:
                         raise SiteFetchError("REDIRECTED")
-                    if response.headers.get_content_type() not in {
-                        "text/html",
-                        "application/xhtml+xml",
-                    }:
+                    if response.headers.get_content_type() not in accepted_content_types:
                         raise SiteFetchError("UNSUPPORTED_CONTENT_TYPE")
                     declared = response.headers.get("Content-Length")
                     if declared is not None:
@@ -256,16 +288,33 @@ class UrlSiteTransport:
                 break
         if len(payload) > SITE_MAX_RESPONSE_BYTES:
             raise SiteFetchError("RESPONSE_TOO_LARGE")
+        return payload, url, charset
+
+    def fetch_html(self, url: str) -> SitePage:
+        original_url = url
+        payload, final_url, charset = self._fetch_bytes(
+            url, accepted_content_types=_HTML_CONTENT_TYPES
+        )
         try:
             html = payload.decode(charset)
         except (LookupError, UnicodeDecodeError) as exc:
             raise SiteFetchError("UNDECODABLE_CONTENT") from exc
         return SitePage(
             url=original_url,
-            final_url=url,
+            final_url=final_url,
             html=html,
             fetched_at=self._clock(),
         )
+
+    def fetch_sitemap(self, url: str) -> list[str]:
+        payload, _final_url, charset = self._fetch_bytes(
+            url, accepted_content_types=_XML_CONTENT_TYPES
+        )
+        try:
+            text = payload.decode(charset)
+        except (LookupError, UnicodeDecodeError) as exc:
+            raise SiteFetchError("UNDECODABLE_CONTENT") from exc
+        return _SITEMAP_LOC_PATTERN.findall(text)[:SITEMAP_MAX_URLS]
 
 
 class _TextExtractor(HTMLParser):
@@ -326,6 +375,8 @@ def _discover_evidence_links(html: str, *, base_url: str) -> dict[str, str]:
         "privacy": ("privacy", "data protection"),
         "careers": ("career", "jobs", "vacancies", "join us"),
         "policy": ("ai policy", "responsible ai", "ai governance", "artificial intelligence"),
+        "terms": ("terms", "terms and conditions", "terms of service", "t&cs"),
+        "cookies": ("cookie", "cookies policy"),
     }
     discovered: dict[str, str] = {}
     for href, label in parser.links:
@@ -383,6 +434,36 @@ def _page_result_is_safe(page: SitePage, *, requested_url: str) -> bool:
         page.final_url,
         requested_url=requested_url,
     )
+
+
+def _attempt_candidate(
+    transport: SiteTransport, url: str, *, home_page: SitePage
+) -> tuple[SitePage | None, str | None, str | None]:
+    """Try fetching one candidate URL as an auxiliary evidence page.
+
+    Returns (page, None, None) on success, or (None, failure_code, failure_url) on
+    failure. Mirrors the single-shot validation previously inlined in run_enrichment:
+    same-origin/canonical redirect safety, a valid timestamp, and rejecting content
+    that's identical to the homepage (a generic "everything redirects here" site).
+    """
+    try:
+        page = transport.fetch_html(url)
+    except SiteFetchError as exc:
+        failure_url = (
+            exc.final_url
+            if exc.final_url and _same_origin_canonical_url(exc.final_url, requested_url=url)
+            else url
+        )
+        return None, str(exc), failure_url
+    if not _page_result_is_safe(page, requested_url=url):
+        return None, "REDIRECTED", url
+    if page.fetched_at.tzinfo is None or page.fetched_at.utcoffset() is None:
+        return None, "INVALID_TIMESTAMP", url
+    if _plain_text(page.html).casefold() == _plain_text(home_page.html).casefold():
+        return None, "DUPLICATE_CONTENT", page.final_url
+    if page.final_url != home_page.final_url:
+        return page, None, None
+    return None, "REDIRECTED", page.final_url
 
 
 def _assert_firm_snapshot_current(
@@ -547,41 +628,73 @@ def run_enrichment(
         if "home" in pages
         else {}
     )
-    targets = {
-        "home": website,
-        "privacy": discovered.get("privacy", urljoin(origin, "privacy")),
-        "careers": discovered.get("careers", urljoin(origin, "careers")),
-        "policy": discovered.get("policy", urljoin(origin, "ai-policy")),
-    }
-    for key, url in targets.items():
-        if key == "home":
-            continue
-        try:
-            page = transport.fetch_html(url)
-        except SiteFetchError as exc:
-            failures[key] = str(exc)
-            failure_urls[key] = (
-                exc.final_url
-                if exc.final_url
-                and _same_origin_canonical_url(exc.final_url, requested_url=url)
-                else url
+    targets: dict[str, str] = {"home": website}
+    sitemap_urls: list[str] | None = None
+
+    def _get_sitemap_urls() -> list[str]:
+        nonlocal sitemap_urls
+        if sitemap_urls is None:
+            fetch_sitemap = getattr(transport, "fetch_sitemap", None)
+            if fetch_sitemap is None:
+                sitemap_urls = []
+            else:
+                try:
+                    sitemap_urls = [
+                        candidate
+                        for candidate in fetch_sitemap(urljoin(origin, "sitemap.xml"))
+                        if _same_origin_canonical_url(candidate, requested_url=website)
+                    ]
+                except SiteFetchError:
+                    sitemap_urls = []
+        return sitemap_urls
+
+    # Aux-page results are discarded entirely below if home itself failed to fetch
+    # (raises before anything is persisted), so there's no point attempting them.
+    for key in ("privacy", "careers", "policy", "terms", "cookies") if "home" in pages else ():
+        candidates = (
+            [discovered[key]]
+            if key in discovered
+            else [urljoin(origin, path) for path in _GUESSED_PATHS[key]]
+        )
+        targets[key] = candidates[0]
+        for candidate_url in candidates:
+            page, failure_code, failure_url = _attempt_candidate(
+                transport, candidate_url, home_page=pages["home"]
             )
-            continue
-        if not _page_result_is_safe(page, requested_url=url):
-            failures[key] = "REDIRECTED"
-            continue
-        if page.fetched_at.tzinfo is None or page.fetched_at.utcoffset() is None:
-            failures[key] = "INVALID_TIMESTAMP"
-            continue
-        if _plain_text(page.html).casefold() == _plain_text(pages["home"].html).casefold():
-            failures[key] = "DUPLICATE_CONTENT"
-            failure_urls[key] = page.final_url
-            continue
-        if page.final_url != pages["home"].final_url:
-            pages[key] = page
-            continue
-        failures[key] = "REDIRECTED"
-        failure_urls[key] = page.final_url
+            if page is not None:
+                pages[key] = page
+                failures.pop(key, None)
+                failure_urls.pop(key, None)
+                break
+            failures[key] = failure_code
+            failure_urls[key] = failure_url or candidate_url
+            if failure_code != "NOT_FOUND":
+                break
+        else:
+            # Every guessed path came back NOT_FOUND -- try one sitemap-matched URL
+            # as a last resort before giving up on this key.
+            matched = next(
+                (
+                    candidate
+                    for candidate in _get_sitemap_urls()
+                    if any(
+                        term in urlsplit(candidate).path.casefold()
+                        for term in _SITEMAP_PATH_KEYWORDS[key]
+                    )
+                ),
+                None,
+            )
+            if matched is not None:
+                page, failure_code, failure_url = _attempt_candidate(
+                    transport, matched, home_page=pages["home"]
+                )
+                if page is not None:
+                    pages[key] = page
+                    failures.pop(key, None)
+                    failure_urls.pop(key, None)
+                else:
+                    failures[key] = failure_code
+                    failure_urls[key] = failure_url or matched
     timestamp = now.astimezone(UTC).isoformat()
     if "home" not in pages:
         failure = failures.get("home", "FETCH_FAILED")
@@ -638,7 +751,7 @@ def run_enrichment(
             firm["source_record_hash"],
         )
     ]
-    for key in ("privacy", "careers", "policy"):
+    for key in ("privacy", "careers", "policy", "terms", "cookies"):
         if key in failures:
             failure = failures[key]
             if failure == "NOT_FOUND":
