@@ -1,14 +1,20 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import sqlite3
 
 import pytest
 
 from govscout.db import connect_database, migrate
 from govscout.fca_pipeline import verify_firm
+from govscout.processing_queue import run_pending_jobs
 from govscout.website_candidates import SearxngWebsiteCandidateProvider
 from govscout.website_candidates import discover_website_candidates
-from tests.test_processing_queue import NOW, _companies_house, _queue_firm
+from govscout.website_candidates import (
+    WebsiteCandidate,
+    _is_confident_domain_match,
+    auto_confirm_high_confidence_website,
+)
+from tests.test_processing_queue import NOW, FakeSiteTransport, _companies_house, _queue_firm
 
 
 class NoCallProvider:
@@ -135,3 +141,154 @@ def test_database_rejects_candidate_provenance_and_unsafe_urls(tmp_path):
             """,
             (search_id,),
         )
+
+
+@pytest.mark.parametrize(
+    ("firm_name", "website_url", "expected"),
+    [
+        ("Example Finance Ltd", "https://examplefinance.test/", True),
+        ("Example Finance Ltd", "https://www.examplefinance.test/", True),
+        ("Example Finance Group Holdings LLP", "https://examplefinance.test/", True),
+        ("Example Finance Ltd", "https://totallydifferent.test/", False),
+        ("Example Finance Ltd", "https://ex.test/", False),
+    ],
+)
+def test_is_confident_domain_match(firm_name, website_url, expected):
+    assert (
+        _is_confident_domain_match(firm_name=firm_name, website_url=website_url) is expected
+    )
+
+
+class _MatchingProvider:
+    def search(self, *, query, limit):
+        return [
+            WebsiteCandidate(
+                website_url="https://examplefinance.test/",
+                source_url="https://search.example.test/results?q=example",
+                title="Example Finance Ltd — Official site",
+                snippet="Example Finance Ltd, FCA regulated financial advice.",
+            )
+        ]
+
+
+class _AmbiguousProvider:
+    def search(self, *, query, limit):
+        return [
+            WebsiteCandidate(
+                website_url="https://totallydifferent.test/",
+                source_url="https://search.example.test/results?q=example",
+                title="Some other site",
+                snippet="Not obviously the firm's official site.",
+            )
+        ]
+
+
+def test_auto_confirm_high_confidence_website_asserts_matching_candidate(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    _queue_firm(conn, website=None)
+    firm = conn.execute("SELECT * FROM fca_firms WHERE frn = '123456'").fetchone()
+    verify_firm(conn, firm_id=firm["id"], companies_house=_companies_house(), now=NOW)
+
+    confirmed = auto_confirm_high_confidence_website(
+        conn,
+        firm_id=firm["id"],
+        firm_name=firm["firm_name"],
+        provider=_MatchingProvider(),
+        now=NOW,
+    )
+
+    assert confirmed == "https://examplefinance.test/"
+    event = conn.execute(
+        "SELECT actor, website_url, action FROM firm_website_evidence_events"
+    ).fetchone()
+    assert event["actor"] == "govscout-auto-confirm"
+    assert event["action"] == "assert"
+    assert event["website_url"] == "https://examplefinance.test/"
+    assert conn.execute("SELECT count(*) FROM fca_reprocessing_jobs").fetchone()[0] == 1
+
+
+def test_auto_confirm_high_confidence_website_skips_ambiguous_candidate(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    _queue_firm(conn, website=None)
+    firm = conn.execute("SELECT * FROM fca_firms WHERE frn = '123456'").fetchone()
+    verify_firm(conn, firm_id=firm["id"], companies_house=_companies_house(), now=NOW)
+
+    confirmed = auto_confirm_high_confidence_website(
+        conn,
+        firm_id=firm["id"],
+        firm_name=firm["firm_name"],
+        provider=_AmbiguousProvider(),
+        now=NOW,
+    )
+
+    assert confirmed is None
+    assert conn.execute(
+        "SELECT count(*) FROM firm_website_evidence_events"
+    ).fetchone()[0] == 0
+    # candidates are still recorded for the existing manual-review UI
+    assert conn.execute("SELECT count(*) FROM website_candidates").fetchone()[0] == 1
+
+
+def test_worker_auto_confirms_high_confidence_website_and_scores(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    _queue_firm(conn, website=None)
+    site = FakeSiteTransport(
+        {
+            "https://examplefinance.test/": "AI-powered FCA regulated advice.",
+            "https://examplefinance.test/privacy": "Privacy and automated decisions.",
+            "https://examplefinance.test/careers": "Our team uses Copilot.",
+            "https://examplefinance.test/ai-policy": "Our AI governance policy.",
+        }
+    )
+
+    # The initial FCA processing job auto-confirms a website (which enqueues a
+    # reprocessing job) but still finishes WEBSITE_MISSING itself, since
+    # fca_firms.website_url is deliberately never overwritten in place. With
+    # limit=5 the worker keeps claiming within the same call, so it also drains
+    # the newly-enqueued reprocessing job and produces a real score in one pass
+    # (in production, with --limit 1, this takes two ~60s ticks instead).
+    result = run_pending_jobs(
+        conn,
+        companies_house=_companies_house(),
+        site_transport=site,
+        now=NOW + timedelta(seconds=2),
+        limit=5,
+        website_candidate_provider=_MatchingProvider(),
+    )
+    assert (result.claimed, result.succeeded, result.failed, result.retried) == (2, 1, 1, 0)
+    firm = conn.execute("SELECT id FROM fca_firms WHERE frn = '123456'").fetchone()
+    event = conn.execute(
+        "SELECT actor FROM firm_website_evidence_events WHERE firm_id = ?", (firm["id"],)
+    ).fetchone()
+    assert event["actor"] == "govscout-auto-confirm"
+    run = conn.execute(
+        "SELECT score, state FROM enrichment_runs WHERE firm_id = ?", (firm["id"],)
+    ).fetchone()
+    assert run["state"] == "complete"
+    assert run["score"] is not None
+
+
+def test_worker_leaves_ambiguous_candidate_for_manual_review(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    _queue_firm(conn, website=None)
+
+    result = run_pending_jobs(
+        conn,
+        companies_house=_companies_house(),
+        site_transport=FakeSiteTransport({}),
+        now=NOW + timedelta(seconds=2),
+        limit=5,
+        website_candidate_provider=_AmbiguousProvider(),
+    )
+
+    assert (result.claimed, result.succeeded, result.failed, result.retried) == (1, 0, 1, 0)
+    job = conn.execute("SELECT outcome_code FROM fca_processing_jobs").fetchone()
+    assert job["outcome_code"] == "WEBSITE_MISSING"
+    assert conn.execute(
+        "SELECT count(*) FROM firm_website_evidence_events"
+    ).fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM website_candidates").fetchone()[0] == 1

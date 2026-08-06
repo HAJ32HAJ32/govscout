@@ -3,13 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import json
+import re
 import sqlite3
 from typing import Callable, Protocol
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from govscout.website_research import WebsiteResearchConflict, _canonical_url
+from govscout.website_research import (
+    WebsiteResearchConflict,
+    _canonical_url,
+    confirm_website_and_enqueue,
+)
 
 VERIFICATION_MAX_AGE = timedelta(days=30)
 EXCLUDED_HOSTS = {
@@ -22,6 +27,8 @@ EXCLUDED_HOSTS = {
     "find-and-update.company-information.service.gov.uk",
     "register.fca.org.uk",
 }
+_LEGAL_SUFFIXES = frozenset({"limited", "ltd", "llp", "plc", "group", "holdings"})
+_MIN_MATCH_LENGTH = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +152,72 @@ def candidate_urls_are_safe(*, website_url: str, source_url: str) -> bool:
     except (TypeError, ValueError):
         return False
     return website == website_url and source == source_url
+
+
+def _normalise_for_match(text: str) -> str:
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    return "".join(token for token in tokens if token not in _LEGAL_SUFFIXES)
+
+
+def _is_confident_domain_match(*, firm_name: str, website_url: str) -> bool:
+    """Conservative name/domain check for auto-confirming a candidate with no human review.
+
+    Deliberately strict: only an exact match, or the firm's full name starting with
+    the domain label, counts as confident. Anything else falls through to the
+    existing manual candidate-review flow rather than guessing.
+    """
+    hostname = urlsplit(website_url).hostname or ""
+    if hostname.startswith("www."):
+        hostname = hostname[len("www.") :]
+    label = hostname.split(".")[0] if hostname else ""
+    normalised_label = re.sub(r"[^a-z0-9]", "", label.lower())
+    normalised_name = _normalise_for_match(firm_name)
+    if len(normalised_label) < _MIN_MATCH_LENGTH or not normalised_name:
+        return False
+    return normalised_label == normalised_name or normalised_name.startswith(normalised_label)
+
+
+def auto_confirm_high_confidence_website(
+    conn: sqlite3.Connection,
+    *,
+    firm_id: int,
+    firm_name: str,
+    provider: WebsiteCandidateProvider,
+    now: datetime,
+) -> str | None:
+    """Search for candidates and, only if the top one is an unambiguous name/domain
+    match, confirm it exactly as the manual `/today` confirm button would, without
+    waiting for a human click.
+
+    Returns the confirmed website URL, or None if no confident match was found
+    (the firm is left with its candidates sitting in the existing manual review UI).
+    Confirming enqueues a reprocessing job the same way manual confirmation does —
+    it does not run enrichment synchronously here.
+    """
+    try:
+        search_id = discover_website_candidates(conn, firm_id=firm_id, provider=provider, now=now)
+    except WebsiteResearchConflict:
+        return None
+    top = conn.execute(
+        "SELECT website_url, source_url FROM website_candidates WHERE search_id = ? AND rank = 1",
+        (search_id,),
+    ).fetchone()
+    if top is None or not _is_confident_domain_match(
+        firm_name=firm_name, website_url=top["website_url"]
+    ):
+        return None
+    confirm_website_and_enqueue(
+        conn,
+        firm_id=firm_id,
+        website_url=top["website_url"],
+        evidence_url=top["source_url"],
+        justification="Auto-confirmed: candidate domain closely matches the firm's registered name.",
+        actor="govscout-auto-confirm",
+        expected_previous_event_id=None,
+        request_reason="Auto-confirmed suggested website via high-confidence name/domain match.",
+        now=now,
+    )
+    return top["website_url"]
 
 
 def discover_website_candidates(

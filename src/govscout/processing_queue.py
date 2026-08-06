@@ -13,6 +13,7 @@ from govscout.enrichment import SiteFetchError, SiteTransport
 from govscout.fca_pipeline import CompanyVerifier, FcaEligibilityError
 from govscout.processing import process_firm
 from govscout.quality import qc_is_current, run_qc
+from govscout.website_candidates import WebsiteCandidateProvider
 from govscout.website_research import (
     WebsiteResearchConflict,
     load_current_reprocessing_input,
@@ -360,6 +361,7 @@ def _run_pending_jobs_locked(
     now: datetime,
     limit: int = 10,
     now_provider: Callable[[], datetime] | None = None,
+    website_candidate_provider: WebsiteCandidateProvider | None = None,
 ) -> QueueRunResult:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
@@ -425,6 +427,7 @@ def _run_pending_jobs_locked(
                     if job.queue_name == "fca_reprocessing_jobs" else None
                 ),
                 now=job_now,
+                website_candidate_provider=website_candidate_provider,
             )
         except (
             CompaniesHouseTransportError,
@@ -482,6 +485,7 @@ def run_pending_jobs(
     now: datetime,
     limit: int = 10,
     now_provider: Callable[[], datetime] | None = None,
+    website_candidate_provider: WebsiteCandidateProvider | None = None,
 ) -> QueueRunResult:
     with _exclusive_worker_lock(conn):
         return _run_pending_jobs_locked(
@@ -491,4 +495,5 @@ def run_pending_jobs(
             now=now,
             limit=limit,
             now_provider=now_provider,
+            website_candidate_provider=website_candidate_provider,
         )

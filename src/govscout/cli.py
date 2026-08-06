@@ -39,6 +39,7 @@ from govscout.fca_pipeline import (
 from govscout.processing import process_firm
 from govscout.processing_queue import run_pending_jobs
 from govscout.quality import run_qc
+from govscout.website_candidates import SearxngWebsiteCandidateProvider
 from govscout.retirement import create_verified_backup, retire_lca_candidates
 from govscout.sendguard import (
     GuardDecision,
@@ -338,6 +339,10 @@ def main(
             migrate(conn)
         try:
             verifier = company_verifier or _default_company_verifier()
+            search_endpoint = os.environ.get("GOVSCOUT_SEARCH_ENDPOINT")
+            website_candidate_provider = (
+                SearxngWebsiteCandidateProvider(search_endpoint) if search_endpoint else None
+            )
             result = run_pending_jobs(
                 conn,
                 companies_house=verifier,
@@ -345,6 +350,7 @@ def main(
                 now=current_time,
                 limit=args.limit,
                 now_provider=(lambda: datetime.now(UTC)) if now is None else None,
+                website_candidate_provider=website_candidate_provider,
             )
         except (sqlite3.Error, ValueError) as exc:
             print(f"FCA queue processing failed: {exc}")
