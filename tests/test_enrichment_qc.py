@@ -73,20 +73,19 @@ def _promote(conn, firm_id, *, verified_at=NOW):
     )
 
 
-def _verify(conn, firm_id, *, verified_at=NOW):
+def _verify(conn, firm_id, *, verified_at=NOW, date_of_creation=None):
+    profile = {
+        "company_number": "12345678",
+        "company_name": "Example Finance Ltd",
+        "company_status": "active",
+        "type": "ltd",
+    }
+    if date_of_creation is not None:
+        profile["date_of_creation"] = date_of_creation
     return verify_firm(
         conn,
         firm_id=firm_id,
-        companies_house=CompaniesHouseClient(
-            StubCompaniesHouseTransport(
-                {
-                    "company_number": "12345678",
-                    "company_name": "Example Finance Ltd",
-                    "company_status": "active",
-                    "type": "ltd",
-                }
-            )
-        ),
+        companies_house=CompaniesHouseClient(StubCompaniesHouseTransport(profile)),
         now=verified_at,
     )
 
@@ -173,6 +172,121 @@ def test_pluggable_enrichment_persists_exact_evidence_and_hot_score(tmp_path):
         "POLICY_URL_NOT_FOUND",
     }
     assert all(row[3] and row[4] for row in evidence if row[2] == "present")
+
+
+_BASELINE_PAGES = {
+    "https://example.test/": (
+        "<h1>FCA regulated advice</h1><p>Our AI-powered assistant helps clients.</p>"
+    ),
+    "https://example.test/privacy": "<h1>Privacy</h1><p>Cookies and contact data.</p>",
+    "https://example.test/careers": "<p>Our team uses Microsoft Copilot.</p>",
+    "https://example.test/ai-policy": SiteFetchError("NOT_FOUND"),
+}
+
+
+def test_established_company_adds_accountability_evidence_and_score(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id, date_of_creation="2015-01-01")
+    transport = FakeSiteTransport(dict(_BASELINE_PAGES))
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    row = conn.execute(
+        """
+        SELECT evidence_state, weight, excerpt FROM evidence_items
+        WHERE run_id = ? AND code = 'ESTABLISHED_COMPANY'
+        """,
+        (result.run_id,),
+    ).fetchone()
+    assert tuple(row) == ("present", 10, "Incorporated 2015-01-01")
+    assert result.score == 95
+
+
+def test_young_company_leaves_established_evidence_absent(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id, date_of_creation=(NOW - timedelta(days=30)).date().isoformat())
+    transport = FakeSiteTransport(dict(_BASELINE_PAGES))
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    row = conn.execute(
+        """
+        SELECT evidence_state, weight FROM evidence_items
+        WHERE run_id = ? AND code = 'ESTABLISHED_COMPANY'
+        """,
+        (result.run_id,),
+    ).fetchone()
+    assert tuple(row) == ("absent", 0)
+    assert result.score == 85
+
+
+def test_missing_incorporation_date_leaves_established_evidence_absent(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+    transport = FakeSiteTransport(dict(_BASELINE_PAGES))
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    row = conn.execute(
+        """
+        SELECT evidence_state, weight FROM evidence_items
+        WHERE run_id = ? AND code = 'ESTABLISHED_COMPANY'
+        """,
+        (result.run_id,),
+    ).fetchone()
+    assert tuple(row) == ("absent", 0)
+    assert result.score == 85
+
+
+def test_tech_tooling_detected_adds_site_health_evidence_and_score(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+    pages = dict(_BASELINE_PAGES)
+    pages["https://example.test/"] += (
+        '<script src="https://www.googletagmanager.com/gtag/js"></script>'
+    )
+    transport = FakeSiteTransport(pages)
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    row = conn.execute(
+        """
+        SELECT evidence_state, weight, excerpt FROM evidence_items
+        WHERE run_id = ? AND code = 'TECH_TOOLING_DETECTED'
+        """,
+        (result.run_id,),
+    ).fetchone()
+    assert row[0] == "present"
+    assert row[1] == 5
+    assert "googletagmanager.com" in row[2]
+    assert result.score == 90
+
+
+def test_no_tech_tooling_leaves_evidence_absent(tmp_path):
+    conn = connect_database(tmp_path / "govscout.sqlite3")
+    migrate(conn)
+    firm_id = _stage(conn)
+    _verify(conn, firm_id)
+    transport = FakeSiteTransport(dict(_BASELINE_PAGES))
+
+    result = run_enrichment(conn, firm_id=firm_id, transport=transport, now=NOW)
+
+    row = conn.execute(
+        """
+        SELECT evidence_state, weight, excerpt FROM evidence_items
+        WHERE run_id = ? AND code = 'TECH_TOOLING_DETECTED'
+        """,
+        (result.run_id,),
+    ).fetchone()
+    assert tuple(row) == ("absent", 0, None)
 
 
 def test_enrichment_records_honest_unknown_when_privacy_page_cannot_be_checked(tmp_path):

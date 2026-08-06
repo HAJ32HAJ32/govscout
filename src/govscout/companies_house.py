@@ -10,6 +10,7 @@ from weakref import WeakValueDictionary
 
 
 COMPANY_NUMBER = re.compile(r"^[A-Z0-9]{8}$")
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 INCORPORATED_TYPE_MAP = {
     "ltd": "ltd",
     "plc": "plc",
@@ -39,6 +40,7 @@ class VerifiedCompany:
     verified_at: datetime
     verification_source: str
     profile_hash: str
+    incorporation_date: str | None
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         raise TypeError("VerifiedCompany must be minted by CompaniesHouseClient")
@@ -75,6 +77,13 @@ def _build_verification_boundary():
             company_status = str(profile.get("company_status", "")).strip().lower()
             company_type = str(profile.get("type", "")).strip().lower()
             company_subtype = str(profile.get("subtype", "")).strip().lower()
+            raw_incorporation_date = profile.get("date_of_creation")
+            incorporation_date = (
+                raw_incorporation_date
+                if isinstance(raw_incorporation_date, str)
+                and _ISO_DATE.fullmatch(raw_incorporation_date)
+                else None
+            )
 
             if not legal_name:
                 raise CompanyNotEligible("Companies House legal name is missing")
@@ -104,6 +113,7 @@ def _build_verification_boundary():
                 "verified_at": now.astimezone(UTC),
                 "verification_source": "companies_house_api",
                 "profile_hash": hashlib.sha256(canonical_profile).hexdigest(),
+                "incorporation_date": incorporation_date,
             }
             for field_name, value in values.items():
                 object.__setattr__(verified, field_name, value)

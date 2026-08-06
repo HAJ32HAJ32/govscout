@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 import hashlib
 from html.parser import HTMLParser
 import http.client
@@ -36,6 +36,7 @@ _FCA_IDENTITY_FIELDS = (
 _HTML_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
 _XML_CONTENT_TYPES = ("application/xml", "text/xml")
 SITEMAP_MAX_URLS = 200
+_ESTABLISHED_COMPANY_MIN_DAYS = 3 * 365
 _SITEMAP_LOC_PATTERN = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.IGNORECASE)
 
 # One guessed path each for the original three keys (unchanged, to keep existing
@@ -366,6 +367,47 @@ class _LinkExtractor(HTMLParser):
             self._parts = []
 
 
+class _ScriptSourceExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.sources: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "script":
+            src = next((value for name, value in attrs if name == "src" and value), None)
+            if src:
+                self.sources.append(src)
+
+
+# Common third-party analytics/chat-widget script hosts -- a first, deliberately small
+# "digital tooling present" signal, not an exhaustive vendor list.
+_TECH_TOOLING_HOSTS = (
+    "google-analytics.com",
+    "googletagmanager.com",
+    "hotjar.com",
+    "segment.com",
+    "intercom.io",
+    "drift.com",
+    "tawk.to",
+    "crisp.chat",
+    "zendesk.com",
+    "hubspot.com",
+    "livechatinc.com",
+)
+
+
+def _detect_tech_tooling(html: str) -> str | None:
+    """Return the first known analytics/chat-widget script hostname found, if any."""
+    parser = _ScriptSourceExtractor()
+    parser.feed(html)
+    parser.close()
+    for src in parser.sources:
+        hostname = (urlsplit(src).hostname or "").casefold()
+        if any(hostname == host or hostname.endswith(f".{host}") for host in _TECH_TOOLING_HOSTS):
+            return hostname
+    return None
+
+
 def _discover_evidence_links(html: str, *, base_url: str) -> dict[str, str]:
     parser = _LinkExtractor()
     parser.feed(html)
@@ -564,7 +606,7 @@ def run_enrichment(
         raise SiteFetchError("COMPANIES_HOUSE_VERIFICATION_REQUIRED")
     verification = conn.execute(
         """
-        SELECT id FROM company_verification_attempts
+        SELECT id, incorporation_date FROM company_verification_attempts
         WHERE firm_id = ? ORDER BY id DESC LIMIT 1
         """,
         (firm_id,),
@@ -572,6 +614,7 @@ def run_enrichment(
     if verification is None:
         raise SiteFetchError("COMPANIES_HOUSE_VERIFICATION_REQUIRED")
     verification_attempt_id = int(verification["id"])
+    incorporation_date = verification["incorporation_date"]
     if website_evidence_event_id is None and website_url is not None:
         raise SiteFetchError("WEBSITE_EVIDENCE_CHANGED")
     website = (
@@ -740,6 +783,16 @@ def run_enrichment(
         raise SiteFetchError(failure)
 
     texts = {key: _plain_text(page.html) for key, page in pages.items()}
+    incorporated_on: date | None = None
+    if incorporation_date:
+        try:
+            incorporated_on = datetime.strptime(incorporation_date, "%Y-%m-%d").date()
+        except ValueError:
+            incorporated_on = None
+    established = (
+        incorporated_on is not None
+        and (now.astimezone(UTC).date() - incorporated_on).days >= _ESTABLISHED_COMPANY_MIN_DAYS
+    )
     evidence: list[_Evidence] = [
         _Evidence(
             "accountability",
@@ -749,7 +802,16 @@ def run_enrichment(
             firm["source_url"],
             f"FCA status: {firm['fca_status']}",
             firm["source_record_hash"],
-        )
+        ),
+        _Evidence(
+            "accountability",
+            "ESTABLISHED_COMPANY",
+            "present" if established else "absent",
+            10 if established else 0,
+            firm["source_url"],
+            f"Incorporated {incorporation_date}" if established else None,
+            _hash(f"ESTABLISHED_COMPANY:{incorporation_date or 'unknown'}"),
+        ),
     ]
     for key in ("privacy", "careers", "policy", "terms", "cookies"):
         if key in failures:
@@ -791,6 +853,19 @@ def run_enrichment(
     else:
         evidence.append(_Evidence("ai_exposure", "AI_VISIBLE", "absent", 0, website, None, _hash("AI_VISIBLE:absent")))
 
+    tech_match = _detect_tech_tooling(pages["home"].html)
+    evidence.append(
+        _Evidence(
+            "site_health",
+            "TECH_TOOLING_DETECTED",
+            "present" if tech_match else "absent",
+            5 if tech_match else 0,
+            pages["home"].final_url,
+            f"Script loaded from {tech_match}" if tech_match else None,
+            _hash(f"TECH_TOOLING_DETECTED:{tech_match or 'none'}"),
+        )
+    )
+
     privacy_text = texts.get("privacy")
     privacy_silent = False
     if privacy_text is None:
@@ -812,8 +887,7 @@ def run_enrichment(
         policy_excerpt = texts["policy"][:300] or "AI policy page returned readable HTML"
         evidence.append(_Evidence("governance_gap", "AI_POLICY_STATUS", "present", 0, pages["policy"].final_url, policy_excerpt, _hash(texts["policy"])))
 
-    gap_score = 15 if privacy_silent else 0
-    score = min(100, 40 + (30 if ai_visible else 0) + gap_score)
+    score = min(100, sum(item.weight for item in evidence if item.state == "present"))
     temperature = "HOT" if score >= 75 else "WARM" if score >= 55 else "COOL"
     page_hash = _hash("\0".join(page.html for page in pages.values()))
     try:

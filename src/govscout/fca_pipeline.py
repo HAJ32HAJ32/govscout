@@ -163,14 +163,15 @@ def verify_firm(
             company.legal_form if state == "verified" and company is not None else None,
             company.company_status if state == "verified" and company is not None else None,
             company.profile_hash if state == "verified" and company is not None else None,
+            company.incorporation_date if state == "verified" and company is not None else None,
         )
         attempt_id = conn.execute(
             """
             INSERT INTO company_verification_attempts (
                 firm_id, company_number, state, reason_code, checked_at,
                 fca_source_record_hash, legal_name, legal_form, company_status,
-                profile_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                profile_hash, incorporation_date
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             values,
         ).lastrowid

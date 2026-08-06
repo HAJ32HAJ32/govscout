@@ -28,6 +28,40 @@ def test_active_companies_house_profile_derives_incorporated_legal_form():
     assert verified.company_status == "active"
     assert verified.verification_source == "companies_house_api"
     assert len(verified.profile_hash) == 64
+    assert verified.incorporation_date is None
+
+
+def test_verified_company_captures_valid_incorporation_date():
+    profile = {
+        "company_number": "12345678",
+        "company_name": "Example Governance Ltd",
+        "company_status": "active",
+        "type": "ltd",
+        "date_of_creation": "2015-06-01",
+    }
+    verified = CompaniesHouseClient(StubCompaniesHouseTransport(profile)).verify_company(
+        "12345678",
+        now=datetime(2026, 7, 20, 9, 0, tzinfo=UTC),
+    )
+
+    assert verified.incorporation_date == "2015-06-01"
+
+
+@pytest.mark.parametrize("bad_date", ["01-06-2015", "not-a-date", "", 12345, None])
+def test_verified_company_ignores_malformed_incorporation_date(bad_date):
+    profile = {
+        "company_number": "12345678",
+        "company_name": "Example Governance Ltd",
+        "company_status": "active",
+        "type": "ltd",
+        "date_of_creation": bad_date,
+    }
+    verified = CompaniesHouseClient(StubCompaniesHouseTransport(profile)).verify_company(
+        "12345678",
+        now=datetime(2026, 7, 20, 9, 0, tzinfo=UTC),
+    )
+
+    assert verified.incorporation_date is None
 
 
 @pytest.mark.parametrize(

@@ -242,6 +242,7 @@ def test_migration_is_versioned_idempotent_and_creates_p1_tables(tmp_path):
         ("013", 64),
         ("014", 64),
         ("015", 64),
+        ("016", 64),
     ]
 
 
@@ -993,6 +994,7 @@ def test_verified_company_cannot_be_forged_by_bypassing_init(tmp_path):
         "verified_at",
         "verification_source",
         "profile_hash",
+        "incorporation_date",
     ):
         object.__setattr__(forged, field_name, getattr(genuine, field_name))
     assert forged == genuine
