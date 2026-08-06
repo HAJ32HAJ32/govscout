@@ -25,6 +25,10 @@ No Gmail OAuth credentials are required for the current checkpoint. Credential a
 - Website enrichment stores source-linked evidence and honest unknown/failure states; current passing QC plus explicit human approval is required for outreach readiness.
 - Operator-confirmed official websites are append-only evidence and never overwrite the FCA-sourced website. `/today` can suggest bounded search candidates or accept a manual URL; one deliberate confirmation queues bounded enrichment and QC tied to current FCA, Collector-import and Companies House evidence.
 
+## Scoring
+
+Each enrichment run computes a 0-100 score and a HOT (>=75) / WARM (>=55) / COOL (below) label, shown on `/today`. The current formula is intentionally minimal: base 40, +30 if the site visibly mentions AI, +15 if the privacy page is silent on AI use (`enrichment.py`, around the `score`/`temperature` assignment). It's a first working signal, not a finished model — richer firmographic, technographic and trigger-event signals are planned incrementally.
+
 ## Development setup
 
 Python 3.12 is the target runtime.
