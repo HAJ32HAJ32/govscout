@@ -4,7 +4,7 @@ GovScout is Mise's review-first lead and cold-outreach application. Its active v
 
 ## Current status
 
-The FCA-first discovery, enrichment, QC and review pipeline is available, while production drafting remains deliberately **fail-closed**. `/today` presents only research and human review work, grouped by pipeline state (see [`docs/today-redesign.md`](docs/today-redesign.md)); dormant draft endpoints and commands still return `LINT_NOT_READY` before capacity is reserved or Gmail is contacted.
+The FCA-first discovery, enrichment, QC and review pipeline is available, while production drafting remains deliberately **fail-closed**. `/today` presents only research and human review work, grouped by pipeline state (see [`docs/today-redesign.md`](docs/today-redesign.md) for the structure and [`docs/today-visual-pass.md`](docs/today-visual-pass.md) / [`docs/design-tokens.md`](docs/design-tokens.md) for the presentation layer); dormant draft endpoints and commands still return `LINT_NOT_READY` before capacity is reserved or Gmail is contacted.
 
 No Gmail OAuth credentials are required for the current checkpoint. Credential and token files must remain outside this repository.
 

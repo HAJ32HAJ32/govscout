@@ -1,0 +1,52 @@
+{# Design tokens for /today. Custom properties only, no selectors beyond
+   :root, so this can be {% include %}-ed first inside the page's single
+   nonce-gated <style> tag. See docs/design-tokens.md for the shipped
+   values and their verified WCAG AA contrast ratios. #}
+:root {
+  --ink: #17251f;
+  --ink-secondary: #47564e;
+  --ink-muted: #5c6b63;
+  --surface: #f7f5f2;
+  --surface-raised: #ffffff;
+  --line: #e0e6e2;
+  --brand: #154f3b;
+  --brand-dark: #123f32;
+  --on-brand: #ffffff;
+  --on-brand-secondary: #d9eee3;
+
+  --temp-hot-bg: #fbe6e2;
+  --temp-hot-text: #8a2f22;
+  --temp-warm-bg: #fbf0d9;
+  --temp-warm-text: #7a5300;
+  --temp-cool-bg: #e4edf3;
+  --temp-cool-text: #2c4f66;
+
+  --signal-intent-bg: #f1eaf9;
+  --signal-intent-text: #5b3a8c;
+  --signal-good-bg: #e4f3ea;
+  --signal-good-text: #1f6b45;
+  --signal-warn-bg: #fdefd6;
+  --signal-warn-text: #7a4a00;
+  --signal-danger-bg: #fbe6e6;
+  --signal-danger-text: #8a2020;
+
+  --text-title: 20px;
+  --text-name: 15px;
+  --text-body: 14px;
+  --text-meta: 12.5px;
+  --leading-body: 1.45;
+  --leading-heading: 1.2;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-card: 20px;
+
+  --radius-card: 12px;
+  --radius-row: 8px;
+  --radius-control: 6px;
+  --radius-chip: 999px;
+}

@@ -225,7 +225,8 @@ def create_app(
     def security_headers(response):
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; base-uri 'none'; form-action 'self'; "
-            f"frame-ancestors 'none'; object-src 'none'; style-src 'nonce-{g.csp_nonce}'"
+            f"frame-ancestors 'none'; object-src 'none'; style-src 'nonce-{g.csp_nonce}'; "
+            f"script-src 'nonce-{g.csp_nonce}'"
         )
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
