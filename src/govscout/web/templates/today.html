@@ -153,6 +153,34 @@
             <button class="reject" type="submit">Withdraw website evidence</button>
           </form>
           {% endif %}
+          {% if firm.contact_evidence_action == "assert" %}
+          <p><strong>Researched contact:</strong>
+            {% if firm.researched_contact_name %}{{ firm.researched_contact_name }}{% endif %}
+            {% if firm.researched_email %} · {{ firm.researched_email }}{% endif %}
+            {% if firm.researched_phone %} · {{ firm.researched_phone }}{% endif %}
+            · <a href="{{ firm.contact_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
+          </p>
+          <p><strong>Justification:</strong> {{ firm.contact_justification }}</p>
+          <form class="review" action="/today/research/{{ firm.id }}/contact" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="expected_contact_evidence_event_id" value="{{ firm.contact_evidence_event_id }}">
+            <input type="hidden" name="action" value="withdraw">
+            <input type="hidden" name="evidence_url" value="{{ firm.contact_evidence_url }}">
+            <label class="wide">Why withdraw this contact evidence?<input name="justification" required maxlength="1000"></label>
+            <button class="reject" type="submit">Withdraw contact evidence</button>
+          </form>
+          {% else %}
+          <form class="review" action="/today/research/{{ firm.id }}/contact" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="expected_contact_evidence_event_id" value="{{ firm.contact_evidence_event_id or '' }}">
+            <label>Contact name<input name="contact_name" maxlength="200"></label>
+            <label>Email<input name="email" type="email" maxlength="254"></label>
+            <label>Phone<input name="phone" maxlength="40"></label>
+            <label>Where did you find this?<input name="evidence_url" type="url" required maxlength="2048" value="{{ firm.fca_register_url }}"></label>
+            <label class="wide">Why you're confident this is right<textarea name="justification" rows="2" required maxlength="1000"></textarea></label>
+            <button class="approve" type="submit">Save contact evidence</button>
+          </form>
+          {% endif %}
           <form class="review" action="/today/research/{{ firm.id }}/archive" method="post">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="expected_archive_event_id" value="{{ firm.archive_event_id or '' }}">
@@ -229,6 +257,23 @@
             <input type="hidden" name="evidence_url" value="{{ firm.website_evidence_url }}">
             <label class="wide">Why withdraw this website evidence?<input name="justification" required maxlength="1000"></label>
             <button class="reject" type="submit">Withdraw website evidence</button>
+          </form>
+          {% endif %}
+          {% if firm.contact_evidence_action == "assert" %}
+          <p><strong>Researched contact:</strong>
+            {% if firm.researched_contact_name %}{{ firm.researched_contact_name }}{% endif %}
+            {% if firm.researched_email %} · {{ firm.researched_email }}{% endif %}
+            {% if firm.researched_phone %} · {{ firm.researched_phone }}{% endif %}
+            · <a href="{{ firm.contact_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
+          </p>
+          <p><strong>Justification:</strong> {{ firm.contact_justification }}</p>
+          <form class="review" action="/today/research/{{ firm.id }}/contact" method="post">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="expected_contact_evidence_event_id" value="{{ firm.contact_evidence_event_id }}">
+            <input type="hidden" name="action" value="withdraw">
+            <input type="hidden" name="evidence_url" value="{{ firm.contact_evidence_url }}">
+            <label class="wide">Why withdraw this contact evidence?<input name="justification" required maxlength="1000"></label>
+            <button class="reject" type="submit">Withdraw contact evidence</button>
           </form>
           {% endif %}
           <form class="review" action="/today/review/{{ firm.id }}" method="post">

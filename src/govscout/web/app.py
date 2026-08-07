@@ -30,6 +30,7 @@ from govscout.auth import (
     verify_password,
 )
 from govscout.collector_imports import COLLECTOR_BATCH_LIMIT, process_collector_import
+from govscout.contact_research import record_contact_evidence
 from govscout.draft_service import (
     DraftAlreadySent,
     DraftOutcomeUncertain,
@@ -398,6 +399,13 @@ def create_app(
                     w.website_url AS researched_website_url,
                     w.evidence_url AS website_evidence_url,
                     w.justification AS website_justification,
+                    c.id AS contact_evidence_event_id,
+                    c.action AS contact_evidence_action,
+                    c.email AS researched_email,
+                    c.phone AS researched_phone,
+                    c.contact_name AS researched_contact_name,
+                    c.evidence_url AS contact_evidence_url,
+                    c.justification AS contact_justification,
                     p.id AS reprocessing_job_id,
                     p.state AS reprocessing_state,
                     p.outcome_code AS reprocessing_outcome
@@ -420,6 +428,10 @@ def create_app(
                 )
                 LEFT JOIN firm_website_evidence_events w ON w.id = (
                     SELECT id FROM firm_website_evidence_events
+                    WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
+                )
+                LEFT JOIN firm_contact_evidence_events c ON c.id = (
+                    SELECT id FROM firm_contact_evidence_events
                     WHERE firm_id = f.id ORDER BY id DESC LIMIT 1
                 )
                 LEFT JOIN fca_reprocessing_jobs p ON p.id = (
@@ -574,6 +586,36 @@ def create_app(
             return jsonify(error="website_evidence_conflict", detail=str(exc)), 409
         except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
             return jsonify(error="website_evidence_refused", detail=str(exc)), 422
+        finally:
+            conn.close()
+        return redirect(url_for("today"), code=303)
+
+    @app.post("/today/research/<int:firm_id>/contact")
+    def record_researched_contact(firm_id: int):
+        raw_expected = request.form.get("expected_contact_evidence_event_id")
+        try:
+            expected_event_id = int(raw_expected) if raw_expected else None
+        except ValueError:
+            return jsonify(error="invalid_contact_evidence_event"), 422
+        conn = conn_factory()
+        try:
+            record_contact_evidence(
+                conn,
+                firm_id=firm_id,
+                action=request.form.get("action", "assert"),
+                email=request.form.get("email"),
+                phone=request.form.get("phone"),
+                contact_name=request.form.get("contact_name"),
+                evidence_url=request.form.get("evidence_url"),
+                justification=request.form.get("justification"),
+                actor=auth.username if auth is not None else "local-operator",
+                expected_previous_event_id=expected_event_id,
+                now=clock(),
+            )
+        except WebsiteResearchConflict as exc:
+            return jsonify(error="contact_evidence_conflict", detail=str(exc)), 409
+        except (KeyError, ValueError, sqlite3.IntegrityError) as exc:
+            return jsonify(error="contact_evidence_refused", detail=str(exc)), 422
         finally:
             conn.close()
         return redirect(url_for("today"), code=303)

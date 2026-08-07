@@ -513,6 +513,76 @@ def test_legacy_separate_website_actions_remain_safe_but_are_not_presented(tmp_p
     assert "Why withdraw this website evidence?" in review_page
 
 
+def test_manual_contact_evidence_can_be_recorded_and_withdrawn(tmp_path):
+    database = tmp_path / "govscout.sqlite3"
+    conn = connect_database(database)
+    migrate(conn)
+    _queue_firm(conn, website=None)
+    firm = conn.execute("SELECT * FROM fca_firms WHERE frn = '123456'").fetchone()
+    assert firm is not None
+    verification = verify_firm(
+        conn,
+        firm_id=firm["id"],
+        companies_house=_companies_house(),
+        now=PROCESSING_NOW,
+    )
+    assert verification.verified is True
+    conn.close()
+    app = create_app(
+        conn_factory=lambda: connect_database(database),
+        guard=SendGuard(load_settings(ROOT / "config/default.toml")),
+        now_provider=lambda: PROCESSING_NOW,
+    )
+    client = app.test_client()
+    page = client.get("/today").get_data(as_text=True)
+    assert "Save contact evidence" in page
+    assert f'action="/today/research/{firm["id"]}/contact"' in page
+    with client.session_transaction() as browser_session:
+        token = browser_session["csrf_token"]
+
+    saved = client.post(
+        f"/today/research/{firm['id']}/contact",
+        data={
+            "csrf_token": token,
+            "contact_name": "Jane Compliance",
+            "email": "compliance@example.test",
+            "phone": "",
+            "evidence_url": "https://register.fca.org.uk/s/firm?id=abc123",
+            "justification": "Listed as the compliance contact on the FCA firm page.",
+        },
+    )
+    assert saved.status_code == 303
+
+    saved_page = client.get("/today").get_data(as_text=True)
+    assert "Researched contact" in saved_page
+    assert "Jane Compliance" in saved_page
+    assert "compliance@example.test" in saved_page
+    assert "Withdraw contact evidence" in saved_page
+
+    verify = connect_database(database)
+    event = verify.execute(
+        "SELECT id, action, email, contact_name FROM firm_contact_evidence_events"
+    ).fetchone()
+    assert tuple(event) == (1, "assert", "compliance@example.test", "Jane Compliance")
+    verify.close()
+
+    withdrawn = client.post(
+        f"/today/research/{firm['id']}/contact",
+        data={
+            "csrf_token": token,
+            "action": "withdraw",
+            "expected_contact_evidence_event_id": "1",
+            "evidence_url": "https://register.fca.org.uk/s/firm?id=abc123",
+            "justification": "Contact left the firm; no longer valid.",
+        },
+    )
+    assert withdrawn.status_code == 303
+
+    after_withdraw_page = client.get("/today").get_data(as_text=True)
+    assert "Save contact evidence" in after_withdraw_page
+    assert "Withdraw contact evidence" not in after_withdraw_page
+
+
 def test_manual_website_confirmation_records_evidence_and_queues_checks_in_one_action(tmp_path):
     database = tmp_path / "govscout.sqlite3"
     conn = connect_database(database)
