@@ -18,3 +18,6 @@ external args needed) and safe to re-run. Run with `sudo bash <script>` (or `sud
   username/password hash. Refuses to run if credentials already exist.
 - `enrich-qc-batch.sh` — find every FCA firm with no enrichment run yet and run enrichment + QC
   for each, using whatever release `/opt/govscout/current` currently points at.
+- `prune-releases.sh` — remove old `/opt/govscout/releases/<commit>` directories, keeping
+  `current`'s target plus the 2 most recently built (for quick rollback). Each release is a full
+  venv (~20-25MB); run this occasionally rather than after every deploy.
