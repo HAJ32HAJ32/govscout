@@ -1,0 +1,152 @@
+{# State C: scored, awaiting decision. The only full card. #}
+<article class="firm card-c">
+  <div class="firm-head">
+    <div>
+      <h3>{{ firm.firm_name }}</h3>
+      <div class="meta">FRN {{ firm.frn }} · {{ firm.fca_status }} · {{ firm.source_location or "Location not found" }}</div>
+      <div class="meta">
+        <a href="{{ firm.fca_register_url }}" target="_blank" rel="noopener noreferrer">FCA Register</a>
+        {% if firm.researched_website_url %} · <a href="{{ firm.researched_website_url }}" target="_blank" rel="noopener noreferrer">Website</a>
+        {% elif firm.website_url %} · <a href="{{ firm.website_url }}" target="_blank" rel="noopener noreferrer">Website</a>{% endif %}
+        {% if firm.company_number %} · Company number {{ firm.company_number }}{% else %} · Company match not available{% endif %}
+      </div>
+    </div>
+    <div class="score {{ firm.temperature or 'COOL' }}">
+      <strong>{{ firm.score if firm.score is not none else "—" }}</strong>
+      {% if firm.temperature == "HOT" %}Hot · {{ firm.score }}
+      {% elif firm.temperature == "WARM" %}Warm · {{ firm.score }}
+      {% elif firm.temperature == "COOL" %}Cool · {{ firm.score }}
+      {% else %}Not scored yet{% endif %}
+    </div>
+  </div>
+
+  {% if firm.check_warnings %}
+  <div class="banner qc-banner">
+    {% for warning in firm.check_warnings %}
+    <p>{{ warning.message }}</p>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if firm.website_evidence_action == "assert" %}
+  <p class="meta">
+    <strong>Researched official website:</strong>
+    <a href="{{ firm.researched_website_url }}" target="_blank" rel="noopener noreferrer">{{ firm.researched_website_url }}</a>
+    · <a href="{{ firm.website_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
+  </p>
+  {% endif %}
+
+  {% if firm.evidence_rows %}
+  <ul class="evidence">
+    {% for row in firm.evidence_rows %}
+    <li class="{{ row.color_class }}">
+      <span class="verdict">{{ row.verdict }}</span>
+      <span class="weight">+{{ row.weight }}</span>
+      {% if row.source_url %} · <a href="{{ row.source_url }}" target="_blank" rel="noopener noreferrer">Source</a>{% endif %}
+      {% if row.raw_excerpt %}
+      <details><summary>Show source text</summary><p class="excerpt">{{ row.raw_excerpt }}</p></details>
+      {% elif row.detail_rows %}
+      <details>
+        <summary>Show individual items</summary>
+        <ul>
+          {% for detail in row.detail_rows %}
+          <li>{{ detail.code }}{% if detail.source_url %} · <a href="{{ detail.source_url }}" target="_blank" rel="noopener noreferrer">Source</a>{% endif %}</li>
+          {% endfor %}
+        </ul>
+      </details>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No evidence has been gathered yet.</p>
+  {% endif %}
+
+  {% if firm.verification_attempts %}
+  <details class="quiet-action">
+    <summary>Verified against Companies House on {{ firm.verification_attempts[0].checked_at_display }}</summary>
+    <ol>
+      {% for attempt in firm.verification_attempts %}
+      <li>{{ attempt.checked_at_display }} · {{ attempt.state|capitalize }} · {{ attempt.reason_code }}{% if attempt.legal_name %} · {{ attempt.legal_name }}{% endif %}</li>
+      {% endfor %}
+    </ol>
+  </details>
+  {% endif %}
+
+  <div class="action-bar">
+    <div class="primary-actions">
+      <form action="/today/review/{{ firm.id }}" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="qc_run_id" value="{{ firm.qc_run_id or '' }}">
+        <label class="wide">Your notes<textarea name="notes" rows="2">{{ firm.review_notes or '' }}</textarea></label>
+        <button class="approve" type="submit" name="decision" value="approved" {% if not firm.qc_current %}disabled aria-describedby="approval-help-{{ firm.id }}"{% endif %}>Approve for outreach</button>
+        {% if not firm.qc_current %}<p id="approval-help-{{ firm.id }}">The checks must be current before approval.</p>{% endif %}
+        <div>
+          <label>Reason for rejecting<input name="rejection_reason"></label>
+          <button class="reject" type="submit" name="decision" value="rejected">Reject</button>
+        </div>
+      </form>
+      {% if firm.review_decision %}
+      <p><strong>Latest decision:</strong> {{ firm.review_decision|capitalize }}{% if firm.review_notes %} · {{ firm.review_notes }}{% endif %}</p>
+      {% endif %}
+    </div>
+    <div class="quiet-actions">
+      <details class="quiet-action">
+        <summary>{% if firm.contact_evidence_action == "assert" %}Contact on file{% else %}Add contact{% endif %}</summary>
+        {% if firm.contact_evidence_action == "assert" %}
+        <p><strong>Researched contact:</strong>
+          {% if firm.researched_contact_name %}{{ firm.researched_contact_name }}{% endif %}
+          {% if firm.researched_email %} · {{ firm.researched_email }}{% endif %}
+          {% if firm.researched_phone %} · {{ firm.researched_phone }}{% endif %}
+          · <a href="{{ firm.contact_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
+        </p>
+        <p><strong>Justification:</strong> {{ firm.contact_justification }}</p>
+        <form action="/today/research/{{ firm.id }}/contact" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_contact_evidence_event_id" value="{{ firm.contact_evidence_event_id }}">
+          <input type="hidden" name="action" value="withdraw">
+          <input type="hidden" name="evidence_url" value="{{ firm.contact_evidence_url }}">
+          <label class="wide">Why withdraw this contact evidence?<input name="justification" required maxlength="1000"></label>
+          <button class="reject" type="submit">Withdraw contact evidence</button>
+        </form>
+        {% else %}
+        <form action="/today/research/{{ firm.id }}/contact" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_contact_evidence_event_id" value="{{ firm.contact_evidence_event_id or '' }}">
+          <label>Contact name<input name="contact_name" maxlength="200"></label>
+          <label>Email<input name="email" type="email" maxlength="254"></label>
+          <label>Phone<input name="phone" maxlength="40"></label>
+          <label>Where did you find this?<input name="evidence_url" type="url" required maxlength="2048" value="{{ firm.fca_register_url }}"></label>
+          <label class="wide">Why you're confident this is right<textarea name="justification" rows="2" required maxlength="1000"></textarea></label>
+          <button class="approve" type="submit">Save contact evidence</button>
+        </form>
+        {% endif %}
+      </details>
+
+      {% if firm.website_evidence_action == "assert" %}
+      <details class="quiet-action">
+        <summary>Withdraw website</summary>
+        <form action="/today/research/{{ firm.id }}/website" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id }}">
+          <input type="hidden" name="action" value="withdraw">
+          <input type="hidden" name="website_url" value="{{ firm.researched_website_url }}">
+          <input type="hidden" name="evidence_url" value="{{ firm.website_evidence_url }}">
+          <label class="wide">Why withdraw this website evidence?<input name="justification" required maxlength="1000"></label>
+          <button class="reject" type="submit">Withdraw website evidence</button>
+        </form>
+      </details>
+      {% endif %}
+
+      <details class="quiet-action">
+        <summary>Archive</summary>
+        <form action="/today/research/{{ firm.id }}/archive" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_archive_event_id" value="{{ firm.archive_event_id or '' }}">
+          <label class="wide">Why archive this firm?<input name="reason" required maxlength="500"></label>
+          <button class="reject" type="submit" name="action" value="archive">Archive</button>
+        </form>
+      </details>
+    </div>
+  </div>
+</article>

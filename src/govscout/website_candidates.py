@@ -27,6 +27,22 @@ EXCLUDED_HOSTS = {
     "find-and-update.company-information.service.gov.uk",
     "register.fca.org.uk",
 }
+# Directory/data-aggregator domains: not excluded from search results (still
+# genuine search hits worth showing), but demoted in the /today UI rather than
+# offered as a confident website match. Grows as new aggregators are noticed.
+DIRECTORY_HOSTS = {
+    "tracxn.com",
+    "youcontrol.com.ua",
+    "endole.co.uk",
+    "find-and-update.company-information.service.gov.uk",
+    "opencorporates.com",
+    "companieshouse.gov.uk",
+    "duedil.com",
+    "creditsafe.com",
+    "bloomberg.com",
+    "zoominfo.com",
+    "crunchbase.com",
+}
 _LEGAL_SUFFIXES = frozenset({"limited", "ltd", "llp", "plc", "group", "holdings"})
 _MIN_MATCH_LENGTH = 4
 
@@ -133,6 +149,19 @@ class SearxngWebsiteCandidateProvider:
 
 def _excluded(hostname: str) -> bool:
     return any(hostname == host or hostname.endswith(f".{host}") for host in EXCLUDED_HOSTS)
+
+
+def is_directory_domain(website_url: str) -> bool:
+    """True when a candidate URL points at a directory/aggregator listing.
+
+    Display-layer classification only (brief: today-redesign.md) - these
+    candidates are demoted in the UI, not filtered out of storage or search.
+    """
+    try:
+        hostname = (urlsplit(website_url).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(hostname == host or hostname.endswith(f".{host}") for host in DIRECTORY_HOSTS)
 
 
 def _bounded_text(value: str, *, maximum: int, field: str, allow_empty: bool = False) -> str:

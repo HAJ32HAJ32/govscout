@@ -1,0 +1,33 @@
+{# State A: not yet researched. Collapsed row, one status line, two actions. #}
+<article class="row row-a">
+  <div class="row-main">
+    <div>
+      <strong>{{ firm.firm_name }}</strong>
+      <span class="meta">FRN {{ firm.frn }} · {{ firm.source_location or "Location not found" }}</span>
+    </div>
+    <div class="meta">
+      {% if firm.verification_attempts and firm.verification_attempts[0].state == "verified" %}
+        Companies House verified, no website on record
+      {% else %}
+        Legal verification and evidence gathering pending
+      {% endif %}
+    </div>
+  </div>
+  <div class="row-actions">
+    {% if candidate_search_enabled %}
+    <form action="/today/research/{{ firm.id }}/website/candidates" method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="approve" type="submit">Find likely websites</button>
+    </form>
+    {% endif %}
+    <details class="quiet-action">
+      <summary>Archive</summary>
+      <form action="/today/research/{{ firm.id }}/archive" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="expected_archive_event_id" value="{{ firm.archive_event_id or '' }}">
+        <label>Why archive this firm?<input name="reason" required maxlength="500"></label>
+        <button class="reject" type="submit" name="action" value="archive">Confirm archive</button>
+      </form>
+    </details>
+  </div>
+</article>

@@ -1,0 +1,98 @@
+{# State B: needs a website confirmed. Collapsed row; expand for candidates
+   or, if a website is already asserted and just waiting on the pipeline, its
+   confirmed detail and a withdraw option. #}
+<article class="row row-b">
+  <details>
+    <summary>
+      <strong>{{ firm.firm_name }}</strong>
+      <span class="meta">FRN {{ firm.frn }} · {{ firm.source_location or "Location not found" }}</span>
+      <span class="meta">
+        {% if firm.website_evidence_action == "assert" %}
+          Website confirmed: {{ firm.researched_website_url }} · checks {{ firm.reprocessing_state or "queued" }}
+        {% elif firm.website_candidates %}
+          {{ firm.website_candidates|length }} likely site{{ "s" if firm.website_candidates|length != 1 else "" }} found: {{ firm.website_candidates[0].domain }}
+        {% else %}
+          No plausible sites found, manual entry available
+        {% endif %}
+      </span>
+    </summary>
+
+    {% if firm.verification_attempts %}
+    <details class="quiet-action">
+      <summary>Companies House history</summary>
+      <ol>
+        {% for attempt in firm.verification_attempts %}
+        <li>{{ attempt.checked_at_display }} · {{ attempt.state|capitalize }} · {{ attempt.reason_code }}{% if attempt.legal_name %} · {{ attempt.legal_name }}{% endif %}</li>
+        {% endfor %}
+      </ol>
+    </details>
+    {% endif %}
+
+    {% if firm.website_evidence_action == "assert" %}
+      <p><strong>Confirmed website:</strong>
+        <a href="{{ firm.researched_website_url }}" target="_blank" rel="noopener noreferrer">{{ firm.researched_website_url }}</a>
+        · <a href="{{ firm.website_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
+      </p>
+      <p><strong>Justification:</strong> {{ firm.website_justification }}</p>
+      <form action="/today/research/{{ firm.id }}/website" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id }}">
+        <input type="hidden" name="action" value="withdraw">
+        <input type="hidden" name="website_url" value="{{ firm.researched_website_url }}">
+        <input type="hidden" name="evidence_url" value="{{ firm.website_evidence_url }}">
+        <label class="wide">Why withdraw this website evidence?<input name="justification" required maxlength="1000"></label>
+        <button class="reject" type="submit">Withdraw website evidence</button>
+      </form>
+    {% else %}
+      {% if firm.website_candidates %}
+      <section class="evidence" aria-label="Suggested website">
+      {% for candidate in firm.website_candidates %}
+      <div class="candidate {{ 'directory' if candidate.is_directory else '' }}">
+        <p>
+          <strong><a href="{{ candidate.website_url }}" target="_blank" rel="noopener noreferrer">{{ candidate.domain }}</a></strong>
+          {% if candidate.is_directory %}<span class="badge muted">Directory listing, unlikely to be the official site</span>{% endif %}
+        </p>
+        <p class="snippet">{{ candidate.title }}{% if candidate.snippet %} · {{ candidate.snippet }}{% endif %}</p>
+        {% if not candidate.is_directory %}
+        <form action="/today/research/{{ firm.id }}/website/candidates/{{ candidate.id }}/confirm" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id or '' }}">
+          <button class="approve" type="submit">Confirm this website and run checks</button>
+        </form>
+        {% endif %}
+      </div>
+      {% endfor %}
+      </section>
+      {% endif %}
+
+      {% if candidate_search_enabled and not firm.website_candidates %}
+      <form action="/today/research/{{ firm.id }}/website/candidates" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="approve" type="submit">Find likely websites</button>
+      </form>
+      {% endif %}
+
+      <details class="quiet-action">
+        <summary>Enter website manually</summary>
+        <form action="/today/research/{{ firm.id }}/website/confirm" method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id or '' }}">
+          <label>Official website URL<input name="website_url" type="url" required maxlength="2048"></label>
+          <label>Where did you confirm it?<input name="evidence_url" type="url" required maxlength="2048"></label>
+          <label class="wide">Why this is the official website<textarea name="justification" rows="2" required maxlength="1000"></textarea></label>
+          <button class="approve" type="submit">Confirm website and run checks</button>
+        </form>
+      </details>
+    {% endif %}
+
+    <details class="quiet-action">
+      <summary>Archive</summary>
+      <form action="/today/research/{{ firm.id }}/archive" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="expected_archive_event_id" value="{{ firm.archive_event_id or '' }}">
+        <label>Why archive this firm?<input name="reason" required maxlength="500"></label>
+        <button class="reject" type="submit" name="action" value="archive">Confirm archive</button>
+      </form>
+    </details>
+  </details>
+</article>

@@ -86,7 +86,7 @@ def test_locked_web_runtime_is_local_only_and_requires_no_gmail(monkeypatch, tmp
     assert args.port == 5050
     assert response.status_code == 200
     page = response.get_data(as_text=True)
-    assert "Needs research" in page
+    assert "No firms are ready to review yet." in page
     assert "Email drafting" not in page
     assert "LINT_NOT_READY" not in page
 

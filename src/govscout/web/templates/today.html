@@ -6,35 +6,59 @@
   <meta name="csrf-token" content="{{ csrf_token }}">
   <title>GovScout — Review firms</title>
   <style nonce="{{ csp_nonce }}">
-    :root { --ink:#17251f; --mise:#154f3b; --mint:#eaf6ef; --line:#d8e2dc; --hot:#9e3023; --warm:#9a6500; --cool:#315d7d; }
+    :root { --ink:#17251f; --mise:#154f3b; --mint:#eaf6ef; --line:#d8e2dc; --hot:#9e3023; --warm:#9a6500; --cool:#315d7d; --purple:#5b3a8c; }
     * { box-sizing: border-box; }
     body { font-family: Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; color: var(--ink); background: #f7f9f7; }
     header { color: white; padding: 2.5rem max(1rem, calc((100vw - 70rem)/2)); background: linear-gradient(120deg, #123f32, #236a4e); }
     header p { max-width: 45rem; margin-bottom: 0; color: #d9eee3; }
+    header .count-line { margin-top: .5rem; color: #d9eee3; font-weight: 600; }
     main { max-width: 70rem; margin: 0 auto; padding: 1.5rem 1rem 4rem; }
-    .banner, .locked, .firm { border: 1px solid var(--line); border-radius: .8rem; padding: 1rem; background: white; }
+    .banner, .locked, .firm, .row { border: 1px solid var(--line); border-radius: .8rem; padding: 1rem; background: white; }
     .banner { border-left: .4rem solid var(--mise); }
+    .qc-banner { border-left-color: var(--warm); background: #fff8ec; }
     .locked { margin-top: 1rem; border-left: .4rem solid #a23b2a; background: #fff5f2; }
     .worklist { margin-top: 2rem; }
-    .firm { margin: 1rem 0; box-shadow: 0 2px 10px rgb(20 50 35 / 6%); }
+    .firm, .row { margin: 1rem 0; box-shadow: 0 2px 10px rgb(20 50 35 / 6%); }
+    .row { padding: .6rem 1rem; }
+    .row-a { display:flex; gap:1rem; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+    .row-a .row-main { display:flex; flex-direction:column; gap:.15rem; }
+    .row-a .row-actions { display:flex; gap:.5rem; align-items:center; }
+    .row-b summary { cursor:pointer; display:flex; flex-direction:column; gap:.15rem; list-style:none; }
+    .row-b summary::-webkit-details-marker { display:none; }
+    .row-b summary::before { content:"▸ "; }
+    .row-b[open] summary::before { content:"▾ "; }
     .firm-head { display:flex; gap:1rem; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
-    .firm h3 { margin:.1rem 0 .35rem; }
+    .firm h3, .row h3 { margin:.1rem 0 .35rem; }
     .meta { color:#53645b; font-size:.92rem; }
     .score { min-width:7rem; text-align:center; padding:.65rem; border-radius:.65rem; background:var(--mint); }
     .score strong { font-size:1.5rem; display:block; }
     .HOT { color:var(--hot); } .WARM { color:var(--warm); } .COOL { color:var(--cool); }
     .evidence { padding:0; list-style:none; }
-    .evidence li { margin:.55rem 0; padding:.65rem; background:#f6f8f6; border-radius:.5rem; }
-    .code { font: 600 .78rem ui-monospace, monospace; }
-    .state { text-transform:uppercase; font-size:.75rem; margin-left:.4rem; }
-    .review { display:grid; grid-template-columns:1fr 1fr; gap:.7rem; margin-top:1rem; }
-    .review textarea, .review input { width:100%; padding:.55rem; border:1px solid #b9c6bf; border-radius:.4rem; }
-    .review .wide { grid-column:1/-1; }
+    .evidence li { margin:.55rem 0; padding:.65rem; background:#f6f8f6; border-radius:.5rem; border-left:.3rem solid #ccd6cf; }
+    .evidence li.intent { border-left-color: var(--purple); }
+    .evidence li.success { border-left-color: var(--mise); }
+    .evidence li.muted { border-left-color: #ccd6cf; opacity: .85; }
+    .evidence .weight { font: 600 .8rem ui-monospace, monospace; color:#53645b; }
+    .excerpt { color:#53645b; font-size:.9rem; }
+    .candidate { border:1px solid var(--line); border-radius:.6rem; padding:.6rem; margin:.5rem 0; }
+    .candidate.directory { opacity:.75; }
+    .badge.muted { display:inline-block; font-size:.78rem; color:#53645b; background:#eef1ee; border-radius:.4rem; padding:.1rem .4rem; margin-left:.4rem; }
+    .snippet { color:#53645b; font-size:.9rem; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .quiet-action { margin-top:.5rem; }
+    .quiet-action summary { cursor:pointer; color:#155e46; font-size:.9rem; }
+    .action-bar { display:flex; gap:1.5rem; justify-content:space-between; flex-wrap:wrap; margin-top:1rem; }
+    .quiet-actions { display:flex; gap:1rem; flex-wrap:wrap; align-self:flex-start; }
+    .review, form.review, .primary-actions form, .action-bar form, .row-b form, .row-a form { display:grid; grid-template-columns:1fr 1fr; gap:.7rem; margin-top:.6rem; }
+    .review textarea, .review input, form textarea, form input:not([type=hidden]) { width:100%; padding:.55rem; border:1px solid #b9c6bf; border-radius:.4rem; }
+    .review .wide, form .wide { grid-column:1/-1; }
     button { cursor:pointer; border:0; border-radius:.4rem; padding:.55rem .8rem; font-weight:650; }
     .approve { background:var(--mise); color:white; }
     .reject { background:#f3ded9; color:#7f271d; }
     a { color:#155e46; }
-    @media (max-width: 42rem) { .review { grid-template-columns:1fr; } .review .wide { grid-column:auto; } }
+    @media (max-width: 42rem) {
+      .review, form.review, .primary-actions form, .action-bar form, .row-b form, .row-a form { grid-template-columns:1fr; }
+      .review .wide, form .wide { grid-column:auto; }
+    }
   </style>
 </head>
 <body>
@@ -47,257 +71,44 @@
     {% endif %}
     <h1>GovScout</h1>
     <p>Review possible firms for MISE. Check why each one may be worth a conversation, then approve or reject it.</p>
+    <p class="count-line">{{ firm_count }} firm{{ "s" if firm_count != 1 else "" }} · {{ scored_count }} scored · {{ in_research_count }} in research</p>
   </header>
   <main>
-    <section class="worklist" aria-labelledby="research-title">
-      <h2 id="research-title">Needs research</h2>
-      <p>These firms are not yet through legal verification, enrichment, and current quality checks. They cannot be approved here.</p>
-      {% if research_firms %}
-        {% for firm in research_firms %}
-        <article class="firm">
-          <div class="firm-head">
-            <div>
-              <h3>{{ firm.firm_name }}</h3>
-              <div class="meta">FCA reference {{ firm.frn }} · {{ firm.fca_status }} · {{ firm.source_location or "Location not found" }}</div>
-              <div class="meta">
-                <a href="{{ firm.fca_register_url }}" target="_blank" rel="noopener noreferrer">Find on FCA Register</a>
-                {% if firm.website_url %} · <a href="{{ firm.website_url }}" target="_blank" rel="noopener noreferrer">Website</a>{% endif %}
-                {% if firm.company_number %} · Company number {{ firm.company_number }}{% else %} · Company match not available{% endif %}
-              </div>
-            </div>
-            <div class="score {{ firm.temperature or 'COOL' }}">
-              <strong>{{ firm.score if firm.score is not none else "—" }}</strong>
-              {% if firm.temperature == "HOT" %}High priority
-              {% elif firm.temperature == "WARM" %}Medium priority
-              {% elif firm.temperature == "COOL" %}Lower priority
-              {% else %}Not scored yet{% endif %}
-            </div>
-          </div>
-          <p><strong>Research state:</strong>
-            {% if firm.qc_state == "pass" %}Needs a fresh check
-            {% elif firm.qc_state %}Checks need attention
-            {% elif firm.enrichment_state %}Checks not run yet
-            {% else %}Legal verification and evidence gathering pending{% endif %}
-          </p>
-          {% if firm.review_decision %}
-          <p><strong>Latest decision:</strong> {{ firm.review_decision|capitalize }}{% if firm.review_notes %} · {{ firm.review_notes }}{% endif %}</p>
-          {% endif %}
-          {% if firm.verification_attempts %}
-          <details>
-            <summary>Companies House history</summary>
-            <ol>
-              {% for attempt in firm.verification_attempts %}
-              <li>{{ attempt.checked_at }} · {{ attempt.state|capitalize }} · {{ attempt.reason_code }}{% if attempt.legal_name %} · {{ attempt.legal_name }}{% endif %}</li>
-              {% endfor %}
-            </ol>
-          </details>
-          {% endif %}
-          {% if firm.qc_reasons and firm.qc_reasons != '[]' %}
-          <details><summary>Why the checks need attention</summary><p>{{ firm.qc_reasons }}</p></details>
-          {% endif %}
-          {% if firm.evidence %}
-          <ul class="evidence">
-            {% for item in firm.evidence %}
-            <li>
-              <strong>{% if item.signal_group == "ai_exposure" %}AI exposure{% else %}{{ item.signal_group|replace('_', ' ')|capitalize }}{% endif %}</strong>
-              <span class="state">{% if item.evidence_state == "present" %}Found{% elif item.evidence_state == "absent" %}Not found{% else %}Could not confirm{% endif %}</span>
-              {% if item.excerpt %}<div>{{ item.excerpt }}</div>{% endif %}
-              {% if item.source_url %}<a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">View source</a>{% endif %}
-            </li>
-            {% endfor %}
-          </ul>
-          {% else %}<p>No website evidence has been gathered yet.</p>{% endif %}
-          {% if firm.website_evidence_action == "assert" %}
-          <p><strong>Researched official website:</strong>
-            <a href="{{ firm.researched_website_url }}" target="_blank" rel="noopener noreferrer">{{ firm.researched_website_url }}</a>
-            · <a href="{{ firm.website_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
-          </p>
-          <p><strong>Justification:</strong> {{ firm.website_justification }}</p>
-          <p><strong>Reprocessing:</strong> {{ firm.reprocessing_state or "Not requested" }}{% if firm.reprocessing_outcome %} · {{ firm.reprocessing_outcome }}{% endif %}</p>
-          {% endif %}
-          {% if firm.website_evidence_action != "assert" %}
-          {% if candidate_search_enabled %}
-          <form class="review" action="/today/research/{{ firm.id }}/website/candidates" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="approve" type="submit">Find likely websites</button>
-          </form>
-          {% endif %}
-          {% for candidate in firm.website_candidates %}
-          <section class="evidence" aria-label="Suggested website">
-            <p><strong>Suggested website:</strong> <a href="{{ candidate.website_url }}" target="_blank" rel="noopener noreferrer">{{ candidate.website_url }}</a></p>
-            <p>{{ candidate.title }}{% if candidate.snippet %} · {{ candidate.snippet }}{% endif %}</p>
-            <form class="review" action="/today/research/{{ firm.id }}/website/candidates/{{ candidate.id }}/confirm" method="post">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-              <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id or '' }}">
-              <button class="approve" type="submit">Confirm this website and run checks</button>
-            </form>
-          </section>
-          {% endfor %}
-          <form class="review" action="/today/research/{{ firm.id }}/website/confirm" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id or '' }}">
-            <label>Official website URL<input name="website_url" type="url" required maxlength="2048"></label>
-            <label>Where did you confirm it?<input name="evidence_url" type="url" required maxlength="2048"></label>
-            <label class="wide">Why this is the official website<textarea name="justification" rows="2" required maxlength="1000"></textarea></label>
-            <button class="approve" type="submit">Confirm website and run checks</button>
-          </form>
-          {% endif %}
-          {% if firm.website_evidence_action == "assert" %}
-          <form class="review" action="/today/research/{{ firm.id }}/website" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id }}">
-            <input type="hidden" name="action" value="withdraw">
-            <input type="hidden" name="website_url" value="{{ firm.researched_website_url }}">
-            <input type="hidden" name="evidence_url" value="{{ firm.website_evidence_url }}">
-            <label class="wide">Why withdraw this website evidence?<input name="justification" required maxlength="1000"></label>
-            <button class="reject" type="submit">Withdraw website evidence</button>
-          </form>
-          {% endif %}
-          {% if firm.contact_evidence_action == "assert" %}
-          <p><strong>Researched contact:</strong>
-            {% if firm.researched_contact_name %}{{ firm.researched_contact_name }}{% endif %}
-            {% if firm.researched_email %} · {{ firm.researched_email }}{% endif %}
-            {% if firm.researched_phone %} · {{ firm.researched_phone }}{% endif %}
-            · <a href="{{ firm.contact_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
-          </p>
-          <p><strong>Justification:</strong> {{ firm.contact_justification }}</p>
-          <form class="review" action="/today/research/{{ firm.id }}/contact" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="expected_contact_evidence_event_id" value="{{ firm.contact_evidence_event_id }}">
-            <input type="hidden" name="action" value="withdraw">
-            <input type="hidden" name="evidence_url" value="{{ firm.contact_evidence_url }}">
-            <label class="wide">Why withdraw this contact evidence?<input name="justification" required maxlength="1000"></label>
-            <button class="reject" type="submit">Withdraw contact evidence</button>
-          </form>
-          {% else %}
-          <form class="review" action="/today/research/{{ firm.id }}/contact" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="expected_contact_evidence_event_id" value="{{ firm.contact_evidence_event_id or '' }}">
-            <label>Contact name<input name="contact_name" maxlength="200"></label>
-            <label>Email<input name="email" type="email" maxlength="254"></label>
-            <label>Phone<input name="phone" maxlength="40"></label>
-            <label>Where did you find this?<input name="evidence_url" type="url" required maxlength="2048" value="{{ firm.fca_register_url }}"></label>
-            <label class="wide">Why you're confident this is right<textarea name="justification" rows="2" required maxlength="1000"></textarea></label>
-            <button class="approve" type="submit">Save contact evidence</button>
-          </form>
-          {% endif %}
-          <form class="review" action="/today/research/{{ firm.id }}/archive" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="expected_archive_event_id" value="{{ firm.archive_event_id or '' }}">
-            <label class="wide">Why archive this firm?<input name="reason" required maxlength="500"></label>
-            <button class="reject" type="submit" name="action" value="archive">Archive</button>
-          </form>
-        </article>
-        {% endfor %}
-      {% else %}<p>No firms need research.</p>{% endif %}
-    </section>
+    {% if not ready_firms %}
+    <p><strong>No firms are ready to review yet.</strong> They cannot be approved here until a website is confirmed and checks have run.</p>
+    {% endif %}
 
-    <section class="worklist" aria-labelledby="fca-title">
-      <h2 id="fca-title">Firms to review</h2>
-      <p>GovScout checks each firm before it can be approved. You stay in control of every decision.</p>
-      {% if review_firms %}
-        {% for firm in review_firms %}
-        <article class="firm">
-          <div class="firm-head">
-            <div>
-              <h3>{{ firm.firm_name }}</h3>
-              <div class="meta">FCA reference {{ firm.frn }} · {{ firm.fca_status }} · {{ firm.source_location or "Location not found" }}</div>
-              <div class="meta">
-                <a href="{{ firm.fca_register_url }}" target="_blank" rel="noopener noreferrer">Find on FCA Register</a>
-                {% if firm.website_url %} · <a href="{{ firm.website_url }}" target="_blank" rel="noopener noreferrer">Website</a>{% endif %}
-                {% if firm.company_number %} · Company number {{ firm.company_number }}{% else %} · Company match not available{% endif %}
-              </div>
-            </div>
-            <div class="score {{ firm.temperature or 'COOL' }}">
-              <strong>{{ firm.score if firm.score is not none else "—" }}</strong>
-              {% if firm.temperature == "HOT" %}High priority
-              {% elif firm.temperature == "WARM" %}Medium priority
-              {% elif firm.temperature == "COOL" %}Lower priority
-              {% else %}Not scored yet{% endif %}
-            </div>
-          </div>
-          <p>
-            <strong>Checks:</strong>
-            {% if firm.qc_current %}Passed
-            {% elif firm.qc_state == "pass" %}Needs a fresh check
-            {% elif firm.qc_state %}Needs attention
-            {% else %}Not checked yet{% endif %}
-            · <strong>Your decision:</strong>
-            {% if firm.review_decision == "approved" %}Approved
-            {% elif firm.review_decision == "rejected" %}Rejected
-            {% else %}Waiting{% endif %}
-          </p>
-          {% if firm.qc_reasons and firm.qc_reasons != '[]' %}
-          <details><summary>Why the checks need attention</summary><p>{{ firm.qc_reasons }}</p></details>
-          {% endif %}
-          {% if firm.evidence %}
-          <ul class="evidence">
-            {% for item in firm.evidence %}
-            <li>
-              <strong>{% if item.signal_group == "ai_exposure" %}AI exposure{% else %}{{ item.signal_group|replace('_', ' ')|capitalize }}{% endif %}</strong>
-              <span class="state">{% if item.evidence_state == "present" %}Found{% elif item.evidence_state == "absent" %}Not found{% else %}Could not confirm{% endif %}</span>
-              {% if item.excerpt %}<div>{{ item.excerpt }}</div>{% endif %}
-              {% if item.source_url %}<a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">View source</a>{% endif %}
-            </li>
-            {% endfor %}
-          </ul>
-          {% else %}<p>No website evidence has been gathered yet.</p>{% endif %}
-          {% if firm.website_evidence_action == "assert" %}
-          <p><strong>Researched official website:</strong>
-            <a href="{{ firm.researched_website_url }}" target="_blank" rel="noopener noreferrer">{{ firm.researched_website_url }}</a>
-            · <a href="{{ firm.website_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
-          </p>
-          <p><strong>Justification:</strong> {{ firm.website_justification }}</p>
-          <p><strong>Reprocessing:</strong> {{ firm.reprocessing_state or "Not requested" }}{% if firm.reprocessing_outcome %} · {{ firm.reprocessing_outcome }}{% endif %}</p>
-          <form class="review" action="/today/research/{{ firm.id }}/website" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="expected_website_evidence_event_id" value="{{ firm.website_evidence_event_id }}">
-            <input type="hidden" name="action" value="withdraw">
-            <input type="hidden" name="website_url" value="{{ firm.researched_website_url }}">
-            <input type="hidden" name="evidence_url" value="{{ firm.website_evidence_url }}">
-            <label class="wide">Why withdraw this website evidence?<input name="justification" required maxlength="1000"></label>
-            <button class="reject" type="submit">Withdraw website evidence</button>
-          </form>
-          {% endif %}
-          {% if firm.contact_evidence_action == "assert" %}
-          <p><strong>Researched contact:</strong>
-            {% if firm.researched_contact_name %}{{ firm.researched_contact_name }}{% endif %}
-            {% if firm.researched_email %} · {{ firm.researched_email }}{% endif %}
-            {% if firm.researched_phone %} · {{ firm.researched_phone }}{% endif %}
-            · <a href="{{ firm.contact_evidence_url }}" target="_blank" rel="noopener noreferrer">Supporting source</a>
-          </p>
-          <p><strong>Justification:</strong> {{ firm.contact_justification }}</p>
-          <form class="review" action="/today/research/{{ firm.id }}/contact" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="expected_contact_evidence_event_id" value="{{ firm.contact_evidence_event_id }}">
-            <input type="hidden" name="action" value="withdraw">
-            <input type="hidden" name="evidence_url" value="{{ firm.contact_evidence_url }}">
-            <label class="wide">Why withdraw this contact evidence?<input name="justification" required maxlength="1000"></label>
-            <button class="reject" type="submit">Withdraw contact evidence</button>
-          </form>
-          {% endif %}
-          <form class="review" action="/today/review/{{ firm.id }}" method="post">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <input type="hidden" name="qc_run_id" value="{{ firm.qc_run_id or '' }}">
-            <label class="wide">Your notes<textarea name="notes" rows="2">{{ firm.review_notes or '' }}</textarea></label>
-            <button class="approve" type="submit" name="decision" value="approved" {% if not firm.qc_current %}disabled aria-describedby="approval-help-{{ firm.id }}"{% endif %}>Approve</button>
-            {% if not firm.qc_current %}<p id="approval-help-{{ firm.id }}">The checks must be current before approval.</p>{% endif %}
-            <div>
-              <label>Reason for rejecting<input name="rejection_reason"></label>
-              <button class="reject" type="submit" name="decision" value="rejected">Reject</button>
-            </div>
-          </form>
-        </article>
-        {% endfor %}
-      {% else %}
-        <p>No firms are ready to review yet.</p>
-      {% endif %}
+    {% if ready_firms %}
+    <section class="worklist" aria-labelledby="ready-title">
+      <h2 id="ready-title">Ready to review</h2>
+      {% for firm in ready_firms %}
+        {% include "_firm_card_c.html" %}
+      {% endfor %}
     </section>
+    {% endif %}
+
+    {% if website_firms %}
+    <section class="worklist" aria-labelledby="website-title">
+      <h2 id="website-title">Needs a website confirmed</h2>
+      {% for firm in website_firms %}
+        {% include "_firm_row_b.html" %}
+      {% endfor %}
+    </section>
+    {% endif %}
+
+    {% if research_firms %}
+    <section class="worklist" aria-labelledby="research-title">
+      <h2 id="research-title">Not yet researched</h2>
+      {% for firm in research_firms %}
+        {% include "_firm_row_a.html" %}
+      {% endfor %}
+    </section>
+    {% endif %}
 
     {% if archived_firms %}
     <section class="worklist" aria-labelledby="archived-title">
       <h2 id="archived-title">Archived firms</h2>
-      <p>Archived firms are excluded from processing, review approval and outreach readiness. Restoring one returns it to the appropriate research or review queue; it does not revive an old approval.</p>
+      <p>Archived firms are excluded from processing, review approval and outreach readiness. Restoring one returns it to the appropriate queue; it does not revive an old approval.</p>
       {% for firm in archived_firms %}
       <article class="firm">
         <h3>{{ firm.firm_name }}</h3>
@@ -313,7 +124,6 @@
       {% endfor %}
     </section>
     {% endif %}
-
   </main>
 </body>
 </html>

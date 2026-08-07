@@ -22,7 +22,7 @@ def test_today_template_is_available_as_a_package_resource():
     )
 
     assert "GovScout — Review firms" in template
-    assert "Needs research" in template
+    assert "Not yet researched" in template
     assert "Email drafts" not in template
 
 

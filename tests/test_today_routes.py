@@ -279,21 +279,20 @@ def test_today_shows_branded_fca_evidence_score_and_review_controls(tmp_path):
     page = app.test_client().get("/today").get_data(as_text=True)
 
     assert "Review possible firms for MISE" in page
-    assert "Needs research" in page
+    assert "Ready to review" in page
     assert "Example Finance Ltd" in page
     assert "London" in page
     assert 'href="https://register.fca.org.uk/s/search?q=123456&amp;type=Companies"' in page
     assert f'href="{source_url}"' not in page
     assert "123456" in page
     assert "82" in page
-    assert "High priority" in page
-    assert "AI exposure" in page
-    assert "Found" in page
+    assert "Hot · 82" in page
+    assert "AI mentioned on site" in page
     assert "AI_VISIBLE" not in page
     assert "AI-powered assistant" in page
-    assert 'action="/today/review/1"' not in page
+    assert 'action="/today/review/1"' in page
     assert 'action="/today/draft/' not in page
-    assert '<label>Reason for rejecting<input name="rejection_reason"' not in page
+    assert '<label>Reason for rejecting<input name="rejection_reason"' in page
 
 
 def test_research_firm_can_be_archived_and_restored_with_append_only_events(tmp_path):
@@ -436,7 +435,7 @@ def test_legacy_separate_website_actions_remain_safe_but_are_not_presented(tmp_p
     )
     assert recorded.status_code == 303
     page = client.get("/today").get_data(as_text=True)
-    assert "Researched official website" in page
+    assert "Confirmed website:" in page
     assert "https://official.example.test/" in page
     assert f'action="/today/research/{firm["id"]}/website/reprocess"' not in page
 
@@ -507,7 +506,7 @@ def test_legacy_separate_website_actions_remain_safe_but_are_not_presented(tmp_p
     monkeypatch.setattr("govscout.web.app.qc_is_current", lambda *_args, **_kwargs: True)
 
     review_page = client.get("/today").get_data(as_text=True)
-    assert "Firms to review" in review_page
+    assert "Ready to review" in review_page
     assert "Researched official website" in review_page
     assert "Supporting source" in review_page
     assert "Why withdraw this website evidence?" in review_page
@@ -527,6 +526,24 @@ def test_manual_contact_evidence_can_be_recorded_and_withdrawn(tmp_path):
         now=PROCESSING_NOW,
     )
     assert verification.verified is True
+    # Contact capture is a state-C (scored) action, so bring the firm to state
+    # C with a minimal completed enrichment run before exercising the form.
+    conn.execute(
+        """
+        INSERT INTO enrichment_runs (
+            firm_id, state, started_at, completed_at, website_url, final_url,
+            input_hash, page_hash, score, temperature
+        ) VALUES (?, 'complete', ?, ?, 'https://example.test/',
+            'https://example.test/', ?, ?, 50, 'WARM')
+        """,
+        (
+            firm["id"],
+            PROCESSING_NOW.isoformat(),
+            PROCESSING_NOW.isoformat(),
+            "b" * 64,
+            "c" * 64,
+        ),
+    )
     conn.close()
     app = create_app(
         conn_factory=lambda: connect_database(database),
@@ -826,10 +843,9 @@ def test_today_does_not_present_expired_qc_as_passing_or_approvable(tmp_path):
     page = app.test_client().get("/today").get_data(as_text=True)
 
     assert "Needs a fresh check" in page
-    assert 'value="approved"' not in page
-    assert 'action="/today/review/1"' not in page
-    assert "They cannot be approved here" in page
-    assert "Checks:</strong>\n            Passed" not in page
+    assert 'value="approved" disabled' in page
+    assert 'action="/today/review/1"' in page
+    assert "The checks must be current before approval." in page
     assert "Company number 12345678" in page
     assert "Company not checked yet" not in page
 
@@ -893,6 +909,24 @@ def test_today_rejection_requires_csrf_and_reason_and_stays_outreach_ineligible(
             "2026-07-25T10:00:00+00:00",
         ),
     ).lastrowid
+    # Decisions render on the state-C card, so give the firm a completed
+    # enrichment run before exercising the review endpoint.
+    conn.execute(
+        """
+        INSERT INTO enrichment_runs (
+            firm_id, state, started_at, completed_at, website_url, final_url,
+            input_hash, page_hash, score, temperature
+        ) VALUES (?, 'complete', ?, ?, 'https://example.test/',
+            'https://example.test/', ?, ?, 50, 'WARM')
+        """,
+        (
+            firm_id,
+            "2026-07-25T10:00:00+00:00",
+            "2026-07-25T10:01:00+00:00",
+            "b" * 64,
+            "c" * 64,
+        ),
+    )
     conn.close()
     app = create_app(
         conn_factory=lambda: connect_database(database),

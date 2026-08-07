@@ -13,6 +13,7 @@ from govscout.website_candidates import (
     WebsiteCandidate,
     _is_confident_domain_match,
     auto_confirm_high_confidence_website,
+    is_directory_domain,
 )
 from tests.test_processing_queue import NOW, FakeSiteTransport, _companies_house, _queue_firm
 
@@ -141,6 +142,20 @@ def test_database_rejects_candidate_provenance_and_unsafe_urls(tmp_path):
             """,
             (search_id,),
         )
+
+
+@pytest.mark.parametrize(
+    ("website_url", "expected"),
+    [
+        ("https://tracxn.com/x/example-finance-ltd", True),
+        ("https://www.endole.co.uk/company/12345678", True),
+        ("https://sub.opencorporates.com/companies/gb/12345678", True),
+        ("https://examplefinance.test/", False),
+        ("https://www.examplefinance.test/about", False),
+    ],
+)
+def test_is_directory_domain(website_url, expected):
+    assert is_directory_domain(website_url) is expected
 
 
 @pytest.mark.parametrize(

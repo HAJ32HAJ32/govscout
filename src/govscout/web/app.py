@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from flask import (
     Flask,
@@ -55,8 +56,11 @@ from govscout.website_candidates import (
     WebsiteCandidateProvider,
     candidate_urls_are_safe,
     discover_website_candidates,
+    is_directory_domain,
     load_confirmable_candidate,
 )
+from govscout.web.check_codes import CheckWarning, translate_check_codes
+from govscout.web.evidence_copy import build_evidence_rows
 from govscout.sendguard import (
     ReservationConflict,
     ReservationRequest,
@@ -88,6 +92,49 @@ class CandidateSource(Protocol):
     def get(self, lead_id: int) -> ReservationRequest: ...
 
     def due(self) -> list[ReservationRequest]: ...
+
+
+def classify_firm_state(
+    row: sqlite3.Row,
+    *,
+    has_candidate_search: bool,
+    candidate_search_enabled: bool,
+) -> str:
+    """Resolve a firm to exactly one of the three /today pipeline states.
+
+    State C (scored, awaiting decision) is keyed on an enrichment run
+    existing at all - that is the signal that evidence has actually been
+    gathered and a score assigned, regardless of whether the most recent QC
+    run is current, stale, or missing entirely. Any QC problem on a state C
+    firm surfaces as a banner (see check_codes.translate_check_codes)
+    rather than pushing the firm back into an earlier state - this matches
+    docs/today-redesign.md section 5, which treats SCAN_MISSING as a state C
+    warning, not a reclassification.
+
+    State B (needs a website confirmed) covers everything short of that:
+    a website already asserted through the research workbench but not yet
+    picked up by enrichment, a candidate search that has already run, or no
+    automated search capability at all (nothing left to "start").
+
+    State A (not yet researched) is the narrow remaining case: no website
+    confirmed, no candidate search has ever run, and an automated search is
+    actually available to run.
+    """
+    if row["enrichment_run_id"] is not None:
+        return "C"
+    if has_candidate_search or not candidate_search_enabled or row["website_evidence_action"] == "assert":
+        return "B"
+    return "A"
+
+
+def _format_date(value: str | None) -> str | None:
+    """Format an ISO timestamp (optionally with microseconds) as "7 Aug 2026"."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).strftime("%-d %b %Y")
+    except ValueError:
+        return value
 
 
 def create_app(
@@ -441,8 +488,10 @@ def create_app(
                 ORDER BY COALESCE(e.score, -1) DESC, f.id
                 """
             ).fetchall()
+            search_enabled = website_candidate_provider is not None
+            ready_firms = []
+            website_firms = []
             research_firms = []
-            review_firms = []
             archived_firms = []
             for row in firm_rows:
                 archived = row["archive_action"] == "archive"
@@ -456,31 +505,66 @@ def create_app(
                         now=current,
                     )
                 )
+                latest_candidate_search = conn.execute(
+                    """
+                    SELECT id FROM website_candidate_searches
+                    WHERE firm_id = ? ORDER BY id DESC LIMIT 1
+                    """,
+                    (row["id"],),
+                ).fetchone()
                 if archived:
                     target = archived_firms
+                    state = None
                 else:
-                    target = review_firms if qc_current else research_firms
+                    state = classify_firm_state(
+                        row,
+                        has_candidate_search=latest_candidate_search is not None,
+                        candidate_search_enabled=search_enabled,
+                    )
+                    target = {"A": research_firms, "B": website_firms, "C": ready_firms}[state]
                 if len(target) >= 50:
                     continue
                 item = dict(row)
+                item["state"] = state
                 item["qc_current"] = qc_current
                 item["fca_register_url"] = fca_register_search_url(row["frn"])
                 if row["enrichment_run_id"] is None:
                     item["evidence"] = []
+                    item["evidence_rows"] = []
+                    item["check_warnings"] = []
                 else:
                     item["evidence"] = [
                         dict(evidence)
                         for evidence in conn.execute(
                             """
-                            SELECT signal_group, code, evidence_state, source_url, excerpt
+                            SELECT signal_group, code, evidence_state, weight, source_url, excerpt
                             FROM evidence_items
                             WHERE run_id = ? ORDER BY signal_group, code
                             """,
                             (row["enrichment_run_id"],),
                         ).fetchall()
                     ]
+                    item["evidence_rows"] = (
+                        build_evidence_rows(item["evidence"], now=current) if state == "C" else []
+                    )
+                    check_warnings = (
+                        translate_check_codes(row["qc_reasons"], state) if state == "C" else []
+                    )
+                    if (
+                        state == "C"
+                        and row["qc_run_id"] is not None
+                        and not qc_current
+                        and not check_warnings
+                    ):
+                        check_warnings = [
+                            CheckWarning(
+                                code="QC_STALE",
+                                message="Needs a fresh check before this can be approved.",
+                            )
+                        ]
+                    item["check_warnings"] = check_warnings
                 item["verification_attempts"] = [
-                    dict(attempt)
+                    {**dict(attempt), "checked_at_display": _format_date(attempt["checked_at"])}
                     for attempt in conn.execute(
                         """
                         SELECT state, reason_code, checked_at, company_number,
@@ -491,18 +575,15 @@ def create_app(
                         (row["id"],),
                     ).fetchall()
                 ]
-                latest_candidate_search = conn.execute(
-                    """
-                    SELECT id FROM website_candidate_searches
-                    WHERE firm_id = ? ORDER BY id DESC LIMIT 1
-                    """,
-                    (row["id"],),
-                ).fetchone()
                 item["website_candidates"] = (
                     []
                     if latest_candidate_search is None
                     else [
-                        dict(candidate)
+                        {
+                            **dict(candidate),
+                            "is_directory": is_directory_domain(candidate["website_url"]),
+                            "domain": urlsplit(candidate["website_url"]).hostname or candidate["website_url"],
+                        }
                         for candidate in conn.execute(
                             """
                             SELECT id, rank, website_url, source_url, title, snippet
@@ -520,19 +601,25 @@ def create_app(
                 target.append(item)
                 if (
                     len(research_firms) >= 50
-                    and len(review_firms) >= 50
+                    and len(website_firms) >= 50
+                    and len(ready_firms) >= 50
                     and len(archived_firms) >= 50
                 ):
                     break
         finally:
             conn.close()
+        firm_count = len(ready_firms) + len(website_firms) + len(research_firms)
         return render_template(
             "today.html",
             csrf_token=session["csrf_token"],
+            ready_firms=ready_firms,
+            website_firms=website_firms,
             research_firms=research_firms,
-            review_firms=review_firms,
             archived_firms=archived_firms,
-            candidate_search_enabled=website_candidate_provider is not None,
+            firm_count=firm_count,
+            scored_count=len(ready_firms),
+            in_research_count=len(website_firms) + len(research_firms),
+            candidate_search_enabled=search_enabled,
             auth_enabled=auth is not None,
         )
 
