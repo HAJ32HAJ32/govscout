@@ -165,6 +165,8 @@
 
     a.locked, .locked { border: 1px solid var(--line); border-radius: var(--radius-card); padding: var(--space-4); background: var(--surface-raised); border-left: 4px solid var(--signal-danger-text); }
 
+    .deploy-footer { max-width: 760px; margin: 0 auto; padding: 0 var(--space-6) var(--space-6); font-size: var(--text-meta); color: var(--ink-muted); }
+
     @media (max-width: 640px) {
       main { padding: var(--space-4); }
       .card { padding: var(--space-4); }
@@ -255,6 +257,7 @@
     </section>
     {% endif %}
   </main>
+  <footer class="deploy-footer">Deployed {{ deployed_commit }}</footer>
   <script nonce="{{ csp_nonce }}">
     // Never more than one form open per card/row: opening a disclosure
     // closes any sibling disclosure within the same firm card or row.

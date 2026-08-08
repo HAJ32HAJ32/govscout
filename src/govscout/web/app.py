@@ -60,6 +60,7 @@ from govscout.website_candidates import (
     load_confirmable_candidate,
 )
 from govscout.web.check_codes import CheckWarning, translate_check_codes
+from govscout.web.deploy_info import read_deployed_commit
 from govscout.web.evidence_copy import build_evidence_rows
 from govscout.sendguard import (
     ReservationConflict,
@@ -160,6 +161,7 @@ def create_app(
         PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
         MAX_CONTENT_LENGTH=16_384,
     )
+    app.jinja_env.globals["deployed_commit"] = read_deployed_commit()
     clock = now_provider or (lambda: datetime.now(UTC))
     drafting_locked = draft_service is None or candidate_source is None
     if auth is None:
