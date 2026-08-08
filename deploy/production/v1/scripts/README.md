@@ -6,6 +6,9 @@ external args needed) and safe to re-run. Run with `sudo bash <script>` (or `sud
 
 - `deploy.sh` — build a new release from the current `main` commit via a clean `git archive`
   checkout, switch `/opt/govscout/current`, restart `govscout.service`, smoke-test `/login`.
+  Deploys are **not** automatic on `git push` — this script must be run explicitly after every
+  merge to `main` that should go live. Verified working end-to-end 2026-08-08 after production
+  ran ~24h behind `main` because this step was skipped; see `docs/deploy-incidents.md`.
 - `reset-database.sh` — back up the live database (integrity-checked, checksummed, to
   `/var/backups/govscout/`) then remove it so `govscout.service` recreates and migrates a fresh
   empty one on restart. Destructive — confirm with H before running against real data.

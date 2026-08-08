@@ -147,6 +147,8 @@ A hardened user-service template is provided at `deploy/govscout.service`. Befor
 
 Defaults and numbered SQL migrations are package resources, so installed wheels do not depend on a source checkout. Migrations run transactionally and applied versions are checksum-verified.
 
+Production runs from an immutable, `pip`-installed release under `/opt/govscout/releases/<commit>/`; `git push` does **not** deploy by itself — `deploy/production/v1/scripts/deploy.sh` must be run explicitly to build a new release and switch `/opt/govscout/current`. `/today` shows a quiet "Deployed `<commit>`" footer so drift between `main` and what's actually live is visible from the page itself. See [`docs/deploy-incidents.md`](docs/deploy-incidents.md) for the verified-working deploy commands and the incident that prompted the footer.
+
 ## Production browser access
 
 GovScout is intended to run once on the Mise VPS. H's PC is a browser client; it

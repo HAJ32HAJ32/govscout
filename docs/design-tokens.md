@@ -48,3 +48,7 @@ Radii: `--radius-card` 12px, `--radius-row` 8px, `--radius-control` 6px, `--radi
 ## Deferred
 
 No icon set is vendored (see implementation notes in `docs/today-visual-pass.md`). Evidence-row icons are CSS-drawn dots coloured per signal type; the QC banner uses a plain unicode `⚠`. Revisit if a lightweight icon set becomes cheaply available.
+
+## Other consumers
+
+The deploy-visibility footer added in `docs/deploy-incidents.md` (`.deploy-footer` in `today.html`) uses `--text-meta` and `--ink-muted`, the same quiet-metadata pairing as row/card metadata lines — no new tokens needed.
